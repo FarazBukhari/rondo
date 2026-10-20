@@ -5,7 +5,7 @@ Updated by `/orchestrate`. A box is checked only after the orchestrator ran the 
 ## Phases
 
 - [x] **P0 Preflight** — git init, toolchain + test-framework probe, disk check
-- [ ] **P1 Scaffold + drag spike** — Package.swift with all targets, bundle/run scripts, menu-bar app launches, Finder drag → Shift → wheel spike
+- [x] **P1 Scaffold + drag spike** — Package.swift with all targets, bundle/run scripts, menu-bar app launches, Finder drag → Shift → wheel spike
 - [ ] **P2 Contracts** — RondoKit per ARCHITECTURE.md, unit tests
 - [ ] **P3 Workstreams** — W1 Interaction · W2 Shell+Actions · W3 Image+PDF · W4 Media · W5 Docs
   - [ ] W1  - [ ] W2  - [ ] W3  - [ ] W4  - [ ] W5
@@ -49,6 +49,8 @@ Updated by `/orchestrate`. A box is checked only after the orchestrator ran the 
 |------|----------|-----|
 | 2026-10-20 | Clean-room from public sources; REA not used on Tangerine | No Intel binary obtainable; EULA bars reverse engineering; REA scope = owned/authorized software |
 | 2026-10-20 | Default keys Shift/Option/Control | Public sources conflict; all remappable |
+| 2026-10-21 | Global drag detection = NSEvent global mouse monitors + drag pasteboard + polled `NSEvent.modifierFlags`; no Accessibility needed | P1 spike: user confirmed wheel + drop in Finder; logs show `drag began` → `modifier tap` → `drop on slice` |
+| 2026-10-21 | Tests via `scripts/test.sh` (Swift Testing + CLT framework flags); package uses Swift 5 language mode | No XCTest in CLT; strict-concurrency friction with AppKit monitors |
 
 ## Blockers
 
