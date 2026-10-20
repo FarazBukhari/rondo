@@ -1,36 +1,30 @@
 import AppKit
 import os
 import RondoInteraction
+import RondoKit
 
-/// Composition root. P1 spike: status item + Finder drag → modifier → wheel → drop.
+/// Composition root. Interim (P3): drag → wheel wired to W1's API; engines and shell land in P4.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let log = Logger(subsystem: "com.farazbukhari.rondo", category: "app")
     private var statusItem: NSStatusItem!
-    private let dragMonitor = DragMonitor()
-    private let wheel = WheelPanel()
     private var lastDropItem: NSMenuItem!
-
-    private let spikeTitles: [NSEvent.ModifierFlags.RawValue: [String]] = [
-        NSEvent.ModifierFlags.shift.rawValue: ["JPG", "PNG", "PDF", "HEIC"],
-        NSEvent.ModifierFlags.option.rawValue: ["Compress", "Crop", "Resize", "Strip"],
-        NSEvent.ModifierFlags.control.rawValue: ["AirDrop", "Float", "Copy", "Path"],
-    ]
+    private let settings = Settings.load()
+    private lazy var registry = EngineRegistry(engines: [])
+    private lazy var dragMonitor = DragMonitor(settings: settings)
+    private lazy var wheel = WheelPanel(itemProvider: RegistryWheelItemProvider(registry: registry))
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setUpStatusItem()
 
         dragMonitor.onTrigger = { [weak self] trigger in
-            guard let self else { return }
-            let titles = self.spikeTitles[trigger.modifier.rawValue] ?? ["?"]
-            self.wheel.present(titles: titles, at: trigger.location)
+            self?.wheel.present(inputs: trigger.urls, at: trigger.location, kind: trigger.kind, mode: .drag)
         }
-        dragMonitor.onDragEnded = { [weak self] in
-            guard let self else { return }
-            // Drop on the wheel is handled by the wheel; anything else cancels.
-            if !self.wheel.contains(NSEvent.mouseLocation) { self.wheel.dismiss() }
+        dragMonitor.onDragEnded = { [weak self] location, _ in
+            self?.wheel.dragEnded(at: location)
         }
-        wheel.onSelect = { [weak self] index, title, urls in
-            self?.handleSpikeDrop(title: title, urls: urls)
+        wheel.onSelect = { [weak self] item, urls in
+            self?.handle(item, urls: urls)
         }
         dragMonitor.start()
         log.notice("Rondo launched")
@@ -38,9 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "circle.circle", accessibilityDescription: "Rondo")
-        }
+        statusItem.button?.image = NSImage(systemSymbolName: "circle.circle", accessibilityDescription: "Rondo")
         let menu = NSMenu()
         lastDropItem = NSMenuItem(title: "No drops yet", action: nil, keyEquivalent: "")
         menu.addItem(lastDropItem)
@@ -49,15 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    private func handleSpikeDrop(title: String, urls: [URL]) {
+    private func handle(_ item: WheelItem, urls: [URL]) {
         let names = urls.map(\.lastPathComponent).joined(separator: ", ")
-        log.notice("spike drop → \(title, privacy: .public): \(names, privacy: .public)")
-        lastDropItem.title = "Last drop: \(names) → \(title)"
-
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Wheel drop received"
-        alert.informativeText = "\(urls.count) file(s) → \(title)\n\(names)"
-        alert.runModal()
+        log.notice("wheel select \(item.id, privacy: .public): \(names, privacy: .public)")
+        lastDropItem.title = "Last: \(names) → \(item.title)"
     }
 }

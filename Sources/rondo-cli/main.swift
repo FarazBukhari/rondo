@@ -1,2 +1,6 @@
-// Placeholder. Real CLI (list / convert / tool / selftest) lands in P4.
-print("rondo-cli: not implemented yet")
+import Foundation
+
+// rondo-cli — headless harness over the same engines the app uses.
+// See `rondo-cli help`.
+let status = await CLI.run(Array(CommandLine.arguments.dropFirst()))
+exit(status)

@@ -8,7 +8,7 @@ Updated by `/orchestrate`. A box is checked only after the orchestrator ran the 
 - [x] **P1 Scaffold + drag spike** — Package.swift with all targets, bundle/run scripts, menu-bar app launches, Finder drag → Shift → wheel spike
 - [x] **P2 Contracts** — RondoKit per ARCHITECTURE.md, unit tests
 - [ ] **P3 Workstreams** — W1 Interaction · W2 Shell+Actions · W3 Image+PDF · W4 Media · W5 Docs
-  - [ ] W1  - [ ] W2  - [ ] W3  - [ ] W4  - [ ] W5
+  - [x] W1  - [ ] W2  - [ ] W3  - [ ] W4  - [ ] W5
 - [ ] **P4 Integration** — registry wiring, app composition, rondo-cli, fixtures, smoke matrix
 - [ ] **P5 Tool windows** — W6 Image editor · W7 Media editor · W8 PDF organizer
   - [ ] W6  - [ ] W7  - [ ] W8
@@ -51,6 +51,7 @@ Updated by `/orchestrate`. A box is checked only after the orchestrator ran the 
 | 2026-10-20 | Default keys Shift/Option/Control | Public sources conflict; all remappable |
 | 2026-10-21 | Global drag detection = NSEvent global mouse monitors + drag pasteboard + polled `NSEvent.modifierFlags`; no Accessibility needed | P1 spike: user confirmed wheel + drop in Finder; logs show `drag began` → `modifier tap` → `drop on slice` |
 | 2026-10-21 | Tests via `scripts/test.sh` (Swift Testing + CLT framework flags); package uses Swift 5 language mode | No XCTest in CLT; strict-concurrency friction with AppKit monitors |
+| 2026-10-21 | W1 default trigger policy `.press` (opens on key-down) | Fastest; risk: ⌥ to force Finder copy opens Tools wheel. Revisit in P6 (`.standardTap` = open on quick release) |
 
 ## Blockers
 

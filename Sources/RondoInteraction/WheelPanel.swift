@@ -1,164 +1,315 @@
 import AppKit
+import ApplicationServices
 import os
+import QuartzCore
+import RondoKit
 
-/// Borderless, non-activating floating panel that shows a radial wheel at the cursor and
-/// accepts file drops on its slices.
+/// Borderless, non-activating, clear floating panel (`.popUpMenu` level) that shows a `WheelView`
+/// centered on the cursor and clamped to the screen's visible frame. Fades/scales in (≤120 ms).
 ///
-/// P1 spike: fixed titles, single ring. W1 replaces the view with the real `WheelView`.
-public final class WheelPanel {
-    public var onSelect: ((_ sliceIndex: Int, _ title: String, _ urls: [URL]) -> Void)?
+/// - `.drag`: the wheel is a drop target for the in-flight file drag. If Accessibility is granted
+///   (`AXIsProcessTrusted()`, never prompted here) a global key monitor adds ←/→/↑/↓/Enter/Esc.
+///   When the drag ends anywhere but a slice, the wheel cancels (self-detected via mouse-button
+///   polling; `dragEnded(at:)` lets the app report it sooner).
+/// - `.click`: the panel takes key focus without activating the app; hover + click, keyboard,
+///   click outside / Esc cancels.
+@MainActor
+public final class WheelPanel: NSObject, NSWindowDelegate {
+    public typealias Mode = WheelView.Mode
+
+    /// Supplies slices for `present(inputs:at:kind:mode:)`. Replace when the registry refreshes.
+    public var itemProvider: WheelItemProvider
+    public var geometry: WheelGeometry
+    /// Allow global arrow/Enter/Esc during drags when Accessibility is already granted.
+    public var keyboardDuringDrag = true
+
+    /// Slice chosen: the item (with its payload) and the files to act on.
+    public var onSelect: ((WheelItem, [URL]) -> Void)?
+    /// User cancelled (Esc, hub, click outside, drag ended off the wheel). Not called by `dismiss()`.
     public var onCancel: (() -> Void)?
 
-    private let panel: NSPanel
-    private let wheel: SpikeWheelView
-    private let diameter: CGFloat = 280
+    public private(set) var mode: Mode?
+    public private(set) var kind: WheelKind?
+    public private(set) var inputs: [URL] = []
+    public var isVisible: Bool { mode != nil }
 
-    public var isVisible: Bool { panel.isVisible }
+    private let log = Logger(subsystem: "com.farazbukhari.rondo", category: "wheel")
+    private let panel: WheelWindow
+    private let container: NSView
+    private let backdrop: NSVisualEffectView
+    private let wheel: WheelView
+    private var generation = 0
+    private var applied = false
+    private var keyMonitor: Any?
+    private var clickMonitor: Any?
+    private var dragWatch: Timer?
+    private var buttonUpSince: TimeInterval?
 
-    public init() {
-        panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: diameter, height: diameter),
+    public init(itemProvider: WheelItemProvider, geometry: WheelGeometry = WheelGeometry()) {
+        self.itemProvider = itemProvider
+        self.geometry = geometry
+        let model = WheelModel(items: [], kind: .convert, geometry: geometry)
+        let side = model.diameter
+        panel = WheelWindow(
+            contentRect: NSRect(x: 0, y: 0, width: side, height: side),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
-            defer: true
+            defer: false
         )
+        container = NSView(frame: NSRect(x: 0, y: 0, width: side, height: side))
+        backdrop = NSVisualEffectView(frame: container.bounds)
+        wheel = WheelView(model: model)
+        super.init()
+
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false
+        panel.hasShadow = true
         panel.level = .popUpMenu
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
+        panel.isMovable = false
+        panel.animationBehavior = .none
+        panel.delegate = self
 
-        wheel = SpikeWheelView(frame: NSRect(x: 0, y: 0, width: diameter, height: diameter))
-        panel.contentView = wheel
-        wheel.onDrop = { [weak self] index, urls in
-            guard let self else { return }
-            let title = self.wheel.titles[index]
-            self.dismiss()
-            self.onSelect?(index, title, urls)
-        }
+        container.wantsLayer = true
+        backdrop.material = .hudWindow
+        backdrop.blendingMode = .behindWindow
+        backdrop.state = .active
+        backdrop.autoresizingMask = [.width, .height]
+        container.addSubview(backdrop)
+        container.addSubview(wheel)
+        panel.contentView = container
+
+        wheel.onActivate = { [weak self] item, urls in self?.select(item, urls: urls) }
+        wheel.onCancel = { [weak self] in self?.cancel() }
     }
 
-    /// Shows the wheel centered on `point` (screen coordinates), clamped to the screen.
-    public func present(titles: [String], at point: NSPoint) {
-        wheel.titles = titles
-        wheel.highlighted = nil
-        var origin = NSPoint(x: point.x - diameter / 2, y: point.y - diameter / 2)
-        if let screen = NSScreen.screens.first(where: { NSMouseInRect(point, $0.frame, false) }) ?? NSScreen.main {
-            let vf = screen.visibleFrame
-            origin.x = min(max(origin.x, vf.minX), vf.maxX - diameter)
-            origin.y = min(max(origin.y, vf.minY), vf.maxY - diameter)
-        }
-        panel.setFrameOrigin(origin)
-        panel.orderFrontRegardless()
+    // MARK: - Public API
+
+    /// Shows the wheel for `inputs` with items from `itemProvider`, centered on `point` (screen coords).
+    /// Calling again while visible switches the kind in place (e.g. another modifier during the drag).
+    public func present(inputs: [URL], at point: CGPoint, kind: WheelKind, mode: Mode) {
+        present(items: itemProvider.items(for: inputs, wheel: kind), inputs: inputs, at: point, kind: kind, mode: mode)
     }
 
+    /// Same as above with explicit items.
+    public func present(items: [WheelItem], inputs: [URL], at point: CGPoint, kind: WheelKind, mode: Mode) {
+        let wasVisible = isVisible
+        if wasVisible, kind == self.kind, mode == self.mode, inputs == self.inputs, !applied { return }
+        generation += 1
+        applied = false
+        self.mode = mode
+        self.kind = kind
+        self.inputs = inputs
+
+        let model = WheelModel(items: items, kind: kind, geometry: geometry)
+        // Switching kind mid-drag: keep the wheel where it is if the cursor is still over it.
+        let center = (wasVisible && panel.frame.contains(point)) ? CGPoint(x: panel.frame.midX, y: panel.frame.midY) : point
+        layout(model: model, centeredOn: center)
+        wheel.mode = mode
+        wheel.inputs = inputs
+        wheel.highlight(nil)
+
+        installMonitors(for: mode)
+        if mode == .click {
+            panel.allowsKey = true
+            panel.makeKeyAndOrderFront(nil)
+            panel.makeFirstResponder(wheel)
+        } else {
+            panel.allowsKey = false
+        }
+        if !wasVisible { animateIn() } else { panel.alphaValue = 1; panel.orderFrontRegardless() }
+        log.notice("wheel \(kind.rawValue, privacy: .public) (\(String(describing: mode), privacy: .public)) with \(items.count, privacy: .public) item(s) for \(inputs.count, privacy: .public) file(s)")
+    }
+
+    /// Hides the wheel without calling `onCancel`.
     public func dismiss() {
-        panel.orderOut(nil)
+        guard isVisible else { return }
+        generation += 1
+        mode = nil
+        kind = nil
+        applied = false
+        removeMonitors()
+        panel.allowsKey = false
+        let gen = generation
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.08
+            panel.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.generation == gen else { return }
+                self.panel.orderOut(nil)
+            }
+        })
     }
 
-    /// True if the screen point is over the visible wheel (used to ignore drag-end outside).
-    public func contains(_ point: NSPoint) -> Bool {
-        panel.isVisible && panel.frame.contains(point)
+    /// Report that the file drag ended (e.g. from `DragMonitor.onDragEnded`). Off-wheel → cancel;
+    /// on a slice → wait briefly for the drop to arrive. Optional: the panel also detects this itself.
+    public func dragEnded(at point: CGPoint) {
+        guard mode == .drag else { return }
+        if applied {
+            dismiss()
+            return
+        }
+        let local = wheel.convert(panel.convertPoint(fromScreen: point), from: nil)
+        guard case .slice = wheel.hit(atViewPoint: local) else {
+            cancel()
+            return
+        }
+        let gen = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, self.generation == gen, self.mode == .drag else { return }
+            self.cancel()   // drop never arrived
+        }
+    }
+
+    /// True if the screen point is over the visible wheel window.
+    public func contains(_ screenPoint: CGPoint) -> Bool {
+        isVisible && panel.frame.contains(screenPoint)
+    }
+
+    // MARK: - Selection / cancel
+
+    private func select(_ item: WheelItem, urls: [URL]) {
+        guard isVisible, !applied else { return }
+        let files = urls.isEmpty ? inputs : urls
+        if mode == .drag, NSEvent.pressedMouseButtons & 1 != 0 {
+            // Keyboard Enter while the drag is still in flight: keep a "queued" wheel under the cursor
+            // until the mouse comes up, so the drop doesn't land on whatever is behind it.
+            applied = true
+            wheel.showApplied()
+            onSelect?(item, files)
+            return
+        }
+        dismiss()
+        onSelect?(item, files)
+    }
+
+    private func cancel() {
+        guard isVisible else { return }
+        log.notice("wheel cancelled")
+        dismiss()
+        onCancel?()
+    }
+
+    // MARK: - Layout + animation
+
+    private func layout(model: WheelModel, centeredOn point: CGPoint) {
+        let side = model.diameter
+        let screen = NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) } ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? CGRect(x: point.x - side, y: point.y - side, width: side * 2, height: side * 2)
+        let frame = WheelPlacement.frame(centeredOn: point, side: side, within: visible)
+        panel.setFrame(frame, display: false)
+        container.frame = NSRect(x: 0, y: 0, width: side, height: side)
+        wheel.setModel(model)
+        wheel.frame = container.bounds
+        backdrop.frame = container.bounds
+        backdrop.maskImage = Self.discMask(side: side, radius: model.outerRadius)
+        container.needsDisplay = true
+        panel.invalidateShadow()
+    }
+
+    private static func discMask(side: CGFloat, radius: CGFloat) -> NSImage {
+        NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: NSRect(x: rect.midX - radius, y: rect.midY - radius, width: radius * 2, height: radius * 2)).fill()
+            return true
+        }
+    }
+
+    private func animateIn() {
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if !reduceMotion, let layer = container.layer {
+            let b = container.bounds
+            var t = CATransform3DMakeTranslation(b.midX, b.midY, 0)
+            t = CATransform3DScale(t, 0.86, 0.86, 1)
+            t = CATransform3DTranslate(t, -b.midX, -b.midY, 0)
+            let scale = CABasicAnimation(keyPath: "transform")
+            scale.fromValue = NSValue(caTransform3D: t)
+            scale.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+            scale.duration = 0.11
+            scale.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            layer.add(scale, forKey: "rondo.scaleIn")
+        }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.1
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+        }
+    }
+
+    // MARK: - Monitors
+
+    private func installMonitors(for mode: Mode) {
+        removeMonitors()
+        switch mode {
+        case .drag:
+            if keyboardDuringDrag, AXIsProcessTrusted() {
+                // Global key events require Accessibility; never prompt from here (Settings owns that).
+                keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                    MainActor.assumeIsolated {
+                        guard let self, self.mode == .drag, let key = WheelKey(keyCode: event.keyCode) else { return }
+                        self.wheel.handleKey(key)
+                    }
+                }
+            }
+            buttonUpSince = nil
+            let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.watchDrag() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            dragWatch = timer
+        case .click:
+            clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.mode == .click, !self.contains(NSEvent.mouseLocation) else { return }
+                    self.cancel()
+                }
+            }
+        }
+    }
+
+    private func removeMonitors() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+        keyMonitor = nil
+        clickMonitor = nil
+        dragWatch?.invalidate()
+        dragWatch = nil
+    }
+
+    /// Safety net: the drag is over once the left button has been up briefly.
+    private func watchDrag() {
+        guard mode == .drag else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if NSEvent.pressedMouseButtons & 1 != 0 {
+            buttonUpSince = nil
+            return
+        }
+        guard let since = buttonUpSince else {
+            buttonUpSince = now
+            return
+        }
+        if now - since > 0.15 {
+            dragWatch?.invalidate()
+            dragWatch = nil
+            dragEnded(at: NSEvent.mouseLocation)
+        }
+    }
+
+    // MARK: - NSWindowDelegate
+
+    public func windowDidResignKey(_ notification: Notification) {
+        if mode == .click { cancel() }
     }
 }
 
-/// Minimal radial drop target. Slice 0 starts at 12 o'clock, clockwise.
-final class SpikeWheelView: NSView {
-    var titles: [String] = [] { didSet { needsDisplay = true } }
-    var highlighted: Int? { didSet { if oldValue != highlighted { needsDisplay = true } } }
-    var onDrop: ((Int, [URL]) -> Void)?
-
-    private let log = Logger(subsystem: "com.farazbukhari.rondo", category: "wheel")
-    private let innerRadiusRatio: CGFloat = 0.32
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        registerForDraggedTypes([.fileURL])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) unused") }
-
-    override var isFlipped: Bool { false }
-
-    func sliceIndex(at point: NSPoint) -> Int? {
-        guard !titles.isEmpty else { return nil }
-        let c = NSPoint(x: bounds.midX, y: bounds.midY)
-        let dx = point.x - c.x, dy = point.y - c.y
-        let r = hypot(dx, dy)
-        let outer = min(bounds.width, bounds.height) / 2
-        guard r >= outer * innerRadiusRatio, r <= outer else { return nil }
-        // Angle clockwise from 12 o'clock, 0..<2π
-        var a = atan2(dx, dy)
-        if a < 0 { a += 2 * .pi }
-        let step = 2 * CGFloat.pi / CGFloat(titles.count)
-        return Int(a / step) % titles.count
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        guard !titles.isEmpty else { return }
-        let c = NSPoint(x: bounds.midX, y: bounds.midY)
-        let outer = min(bounds.width, bounds.height) / 2 - 2
-        let inner = outer * innerRadiusRatio
-        let step = 360.0 / CGFloat(titles.count)
-
-        for (i, title) in titles.enumerated() {
-            // NSBezierPath angles: degrees counter-clockwise from 3 o'clock.
-            let start = 90 - CGFloat(i) * step
-            let end = start - step
-            let path = NSBezierPath()
-            path.appendArc(withCenter: c, radius: outer, startAngle: start, endAngle: end, clockwise: true)
-            path.appendArc(withCenter: c, radius: inner, startAngle: end, endAngle: start, clockwise: false)
-            path.close()
-            (i == highlighted ? NSColor.controlAccentColor : NSColor.windowBackgroundColor.withAlphaComponent(0.92)).setFill()
-            path.fill()
-            NSColor.separatorColor.setStroke()
-            path.lineWidth = 1
-            path.stroke()
-
-            let mid = (start + end) / 2 * .pi / 180
-            let labelR = (outer + inner) / 2
-            let p = NSPoint(x: c.x + cos(mid) * labelR, y: c.y + sin(mid) * labelR)
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                .foregroundColor: i == highlighted ? NSColor.white : NSColor.labelColor,
-            ]
-            let size = (title as NSString).size(withAttributes: attrs)
-            (title as NSString).draw(at: NSPoint(x: p.x - size.width / 2, y: p.y - size.height / 2), withAttributes: attrs)
-        }
-
-        let hub = NSBezierPath(ovalIn: NSRect(x: c.x - inner + 4, y: c.y - inner + 4, width: (inner - 4) * 2, height: (inner - 4) * 2))
-        NSColor.windowBackgroundColor.withAlphaComponent(0.95).setFill()
-        hub.fill()
-    }
-
-    // MARK: - NSDraggingDestination
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        draggingUpdated(sender)
-    }
-
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        highlighted = sliceIndex(at: convert(sender.draggingLocation, from: nil))
-        return highlighted == nil ? [] : .copy
-    }
-
-    override func draggingExited(_ sender: NSDraggingInfo?) {
-        highlighted = nil
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let index = sliceIndex(at: convert(sender.draggingLocation, from: nil)) else { return false }
-        let urls = sender.draggingPasteboard.readObjects(
-            forClasses: [NSURL.self],
-            options: [.urlReadingFileURLsOnly: true]
-        ) as? [URL] ?? []
-        guard !urls.isEmpty else { return false }
-        log.notice("drop on slice \(index, privacy: .public): \(urls.map(\.path).joined(separator: ", "), privacy: .public)")
-        highlighted = nil
-        // Defer so the drag session completes before the callback shows UI.
-        DispatchQueue.main.async { self.onDrop?(index, urls) }
-        return true
-    }
+/// Non-activating panel that may take key focus (click mode) without activating Rondo.
+final class WheelWindow: NSPanel {
+    var allowsKey = false
+    override var canBecomeKey: Bool { allowsKey }
+    override var canBecomeMain: Bool { false }
 }

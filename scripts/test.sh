@@ -18,7 +18,7 @@ FLAGS=(-Xswiftc -F -Xswiftc "$F"
 
 if [[ "${1:-}" == "build" ]]; then
   [[ -n "${2:-}" ]] || { echo "usage: $0 build <TestTarget>" >&2; exit 2; }
-  exec swift build --build-tests --target "$2" "${FLAGS[@]}"
+  exec swift build --target "$2" "${FLAGS[@]}"
 fi
 
 if [[ $# -gt 0 ]]; then
