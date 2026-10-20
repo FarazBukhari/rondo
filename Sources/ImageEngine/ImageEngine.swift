@@ -19,11 +19,29 @@ public struct RasterEngine: Engine {
         return RondoKit.conversions(from: ins, to: outs)
     }
 
-    public func tools() -> [ToolDescriptor] { Self.descriptors }
+    /// Every tool hides itself for formats this Mac can't decode (e.g. SVG without magick).
+    public func tools() -> [ToolDescriptor] {
+        let unreadable = Set(ImageFormats.inputs.filter { !ImageFormats.canRead($0, tools: locator) })
+        return Self.descriptors(unreadable: unreadable)
+    }
 
     static let image: Set<FileKind> = [.image]
 
-    static let descriptors: [ToolDescriptor] = [
+    /// Formats each tool's `run` refuses outright (beyond what this Mac can't decode).
+    static let toolRejects: [String: Set<String>] = [
+        "image.compress": ["svg"],          // vector source: nothing meaningful to recompress
+        "image.metadata.strip": ["svg"],    // would rasterize the SVG
+    ]
+
+    static func descriptors(unreadable: Set<String>) -> [ToolDescriptor] {
+        baseDescriptors.map { d in
+            ToolDescriptor(id: d.id, title: d.title, symbol: d.symbol, accepts: d.accepts, multiInput: d.multiInput,
+                           needsUI: d.needsUI, options: d.options,
+                           rejectsFormats: d.rejectsFormats.union(unreadable).union(toolRejects[d.id.rawValue] ?? []))
+        }
+    }
+
+    static let baseDescriptors: [ToolDescriptor] = [
         ToolDescriptor(id: "image.compress", title: "Compress", symbol: "arrow.down.right.and.arrow.up.left", accepts: image, options: [
             OptionSpec(key: "quality", title: "Quality", control: .slider(min: 0.05, max: 1, step: 0.05), defaultValue: .double(0.7)),
             OptionSpec(key: "percent", title: "Reduce size by (%)", control: .slider(min: 5, max: 95, step: 5), defaultValue: nil),

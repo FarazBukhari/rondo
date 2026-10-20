@@ -101,6 +101,16 @@ public struct PDFDocumentEngine: Engine {
         return try context.namer.commit(folder, to: context.namer.folder(for: input, suffix: "pages", destination: context.destination))
     }
 
+    /// Text-producing conversions refuse to commit content-free files.
+    private func requireText(_ pages: [String], input: URL, ocr: Bool) throws {
+        guard pages.allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return }
+        throw noText(input, ocr: ocr)
+    }
+
+    private func noText(_ input: URL, ocr: Bool) -> EngineError {
+        .invalidInput("No text found in \(input.lastPathComponent) " + (ocr ? "(OCR found nothing either)" : "(OCR is off)"))
+    }
+
     private func title(of doc: PDFDocument, input: URL) -> String {
         if let t = doc.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String,
            !t.trimmingCharacters(in: .whitespaces).isEmpty { return t }
@@ -122,7 +132,9 @@ public struct PDFDocumentEngine: Engine {
 
     private func pdfToText(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
         let doc = try PDFSupport.open(input)
-        let pages = try PDFExport.pageTexts(doc, ocr: job.bool("ocr", default: true)) { progress($0 * 0.9) }
+        let ocr = job.bool("ocr", default: true)
+        let pages = try PDFExport.pageTexts(doc, ocr: ocr) { progress($0 * 0.9) }
+        try requireText(pages, input: input, ocr: ocr)
         let out = try PDFSupport.scratchDir(context).appendingPathComponent("text.txt")
         try PDFExport.plainText(pages).write(to: out, atomically: true, encoding: .utf8)
         return try commit(out, for: input, ext: "txt", context: context)
@@ -130,7 +142,9 @@ public struct PDFDocumentEngine: Engine {
 
     private func pdfToMarkdown(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
         let doc = try PDFSupport.open(input)
-        let pages = try PDFExport.pageTexts(doc, ocr: job.bool("ocr", default: true)) { progress($0 * 0.9) }
+        let ocr = job.bool("ocr", default: true)
+        let pages = try PDFExport.pageTexts(doc, ocr: ocr) { progress($0 * 0.9) }
+        try requireText(pages, input: input, ocr: ocr)
         let out = try PDFSupport.scratchDir(context).appendingPathComponent("text.md")
         try PDFExport.markdown(pages, title: title(of: doc, input: input)).write(to: out, atomically: true, encoding: .utf8)
         return try commit(out, for: input, ext: "md", context: context)
@@ -138,7 +152,8 @@ public struct PDFDocumentEngine: Engine {
 
     private func pdfToDocx(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
         let doc = try PDFSupport.open(input)
-        let data = try PDFExport.docx(doc, ocr: job.bool("ocr", default: true), progress: progress)
+        let ocr = job.bool("ocr", default: true)
+        guard let data = try PDFExport.docx(doc, ocr: ocr, progress: progress) else { throw noText(input, ocr: ocr) }
         let out = try PDFSupport.scratchDir(context).appendingPathComponent("doc.docx")
         try data.write(to: out)
         return try commit(out, for: input, ext: "docx", context: context)
@@ -146,7 +161,9 @@ public struct PDFDocumentEngine: Engine {
 
     private func pdfToEpub(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
         let doc = try PDFSupport.open(input)
-        let pages = try PDFExport.pageTexts(doc, ocr: job.bool("ocr", default: true)) { progress($0 * 0.8) }
+        let ocr = job.bool("ocr", default: true)
+        let pages = try PDFExport.pageTexts(doc, ocr: ocr) { progress($0 * 0.8) }
+        try requireText(pages, input: input, ocr: ocr)
         let author = doc.documentAttributes?[PDFDocumentAttribute.authorAttribute] as? String
         let lang = Locale.preferredLanguages.first.map { String($0.prefix(while: { $0 != "-" && $0 != "_" })) } ?? "en"
         let data = PDFExport.epub(pages: pages, title: title(of: doc, input: input), author: author, language: lang)

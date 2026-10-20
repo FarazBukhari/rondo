@@ -105,6 +105,15 @@ struct StubEngine: Engine {
         #expect(registry.tools(for: [u("a.mp4"), u("b.mov")]).map(\.id.rawValue) == ["video.join"])
     }
 
+    @Test func rejectedFormatsHideTool() {
+        let reg = EngineRegistry(engines: [StubEngine(id: "x", toolList: [
+            ToolDescriptor(id: "image.compress", title: "Compress", symbol: "a", accepts: [.image], rejectsFormats: ["svg"]),
+        ])])
+        #expect(reg.tools(for: [u("a.svg")]).isEmpty)
+        #expect(reg.tools(for: [u("a.png")]).count == 1)
+        #expect(reg.tools(for: [u("a.png"), u("b.svg")]).isEmpty)
+    }
+
     @Test func engineLookup() {
         #expect(registry.engine(for: JobSpec(inputs: [u("a.mov")], operation: .convert(to: "gif")))?.id == "media")
         #expect(registry.engine(for: JobSpec(inputs: [u("a.jpg")], operation: .tool("image.crop")))?.id == "img")

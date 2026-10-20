@@ -364,3 +364,49 @@ extension ToolLocator {
         #expect(corner.r > 240 && corner.g < 15 && corner.b > 240 && corner.a == 255)
     }
 }
+
+@Suite struct ImageRegressionTests {
+    /// Smoke bug: palette (indexed) PNG → BMP produced a file ImageIO couldn't read back.
+    @Test func palettePNGConvertsToReadableOutputs() async throws {
+        guard ToolLocator().has("magick") else { return }
+        let dir = try Fx.dir("palette")
+        defer { Fx.cleanup(dir) }
+        let src = dir.appendingPathComponent("second.png")
+        try await Fx.magick(["-size", "160x120", "xc:white", "-fill", "seagreen", "-draw", "rectangle 20,20 140,100", src.path])
+        #expect(Fx.load(src)?.colorSpace?.model == .indexed)
+        for target in ["bmp", "jpg", "tiff", "gif", "heic", "pdf"] {
+            let out = try await RasterEngine().runTest(JobSpec(inputs: [src], operation: .convert(to: target)))
+            if target == "pdf" { #expect(Fx.pdfPageCount(out[0]) == 1); continue }
+            let img = try #require(Fx.load(out[0]), "\(target) output unreadable")
+            #expect(img.width == 160 && img.height == 120)
+            let p = Fx.pixel(img, 80, 60)
+            #expect(abs(p.r - 46) < 20 && abs(p.g - 139) < 20 && abs(p.b - 87) < 20, "\(target): \(p)")
+            #expect(Fx.isWhite(Fx.pixel(img, 5, 5)), "\(target) corner")
+        }
+        // Tools on a palette source too.
+        let resized = try await RasterEngine().runTest(JobSpec(inputs: [src], operation: .tool("image.resize"), options: ["width": .int(80)]))
+        #expect(Fx.load(resized[0])?.width == 80)
+    }
+
+    /// Tools that would throw for SVG declare it via `rejectsFormats`, so the registry hides them.
+    @Test func toolsRejectFormatsTheyCantHandle() {
+        let engine = RasterEngine()
+        let byID = Dictionary(uniqueKeysWithValues: engine.tools().map { ($0.id.rawValue, $0) })
+        #expect(byID["image.compress"]?.rejectsFormats.contains("svg") == true)
+        #expect(byID["image.metadata.strip"]?.rejectsFormats.contains("svg") == true)
+        let svg = URL(fileURLWithPath: "/tmp/x.svg"), png = URL(fileURLWithPath: "/tmp/x.png")
+        let registry = EngineRegistry(engines: [engine])
+        let forSVG = Set(registry.tools(for: [svg]).map(\.id.rawValue))
+        #expect(!forSVG.contains("image.compress") && !forSVG.contains("image.metadata.strip"))
+        #expect(registry.tools(for: [png, svg]).allSatisfy { $0.id != "image.compress" })
+        #expect(registry.tools(for: [png]).contains { $0.id == "image.compress" })
+        if ToolLocator().has("magick") {
+            #expect(forSVG.isSuperset(of: ["image.resize", "image.toPDF", "image.crop", "image.metadata.read"]))
+            #expect(byID["image.resize"]?.rejectsFormats.isEmpty == true)
+        }
+        // Without magick nothing can decode SVG, so every tool hides for it.
+        let bare = RasterEngine(tools: ToolLocator(overrides: [:], bundleBin: nil).withoutSearch())
+        #expect(bare.tools().allSatisfy { $0.rejectsFormats.contains("svg") })
+        #expect(EngineRegistry(engines: [bare]).tools(for: [svg]).isEmpty)
+    }
+}

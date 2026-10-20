@@ -33,6 +33,28 @@ enum ImageOps {
         return ctx
     }
 
+    /// Palette (indexed), sub-8-bit, or unusual color models → 8-bit (or 16-bit) RGB/gray via a bitmap
+    /// context, so every encoder and pixel op sees a plain image (ImageIO writes unreadable palette BMPs otherwise).
+    static func normalized(_ image: CGImage) -> CGImage {
+        let model = image.colorSpace?.model
+        let plain = (model == .rgb || model == .monochrome) && image.bitsPerComponent >= 8
+        guard !plain, let ctx = context(width: image.width, height: image.height, like: image, opaque: !image.hasAlpha) else { return image }
+        ctx.draw(image, in: CGRect(origin: .zero, size: image.size))
+        return ctx.makeImage() ?? image
+    }
+
+    /// Opaque 8-bit RGB (source RGB profile kept when usable) — the one layout every BMP reader handles.
+    static func rgb8(_ image: CGImage) -> CGImage {
+        let src = image.colorSpace
+        let cs = (src?.model == .rgb && src?.supportsOutput == true) ? src! : sRGB
+        guard let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: cs, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return image }
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(origin: .zero, size: image.size))
+        ctx.draw(image, in: CGRect(origin: .zero, size: image.size))
+        return ctx.makeImage() ?? image
+    }
+
     /// Bakes an EXIF orientation into the pixels so every output format displays upright.
     static func oriented(_ image: CGImage, _ orientation: CGImagePropertyOrientation) -> CGImage {
         guard orientation != .up else { return image }

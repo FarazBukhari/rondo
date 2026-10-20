@@ -55,7 +55,10 @@ extension FFmpegEngine {
         if info.audio != nil && audioEnc == nil { throw EngineError.missingTool("a \(srcFmt.displayName) audio encoder in ffmpeg") }
         let out = ctx.tempFile(named: "out.\(srcFmt.preferredExtension)")
         let vf = ["-vf", (filters + [evenScale]).joined(separator: ",")]
-        let audioArgs = audioEnc.map { $0.args(bitrate: audioRate, source: info.audio) } ?? ["-an"]
+        let audioArgs = audioEnc.map { e in
+            (e.requiredFilters.isEmpty ? [] : ["-af", e.requiredFilters.joined(separator: ",")])
+                + e.args(bitrate: audioRate, source: info.audio)
+        } ?? ["-an"]
 
         if twoPass && enc.supportsTwoPass {
             let passlog = ctx.tempFile(named: "pass").path
@@ -129,7 +132,9 @@ extension FFmpegEngine {
                 pads += "[a\(i)]"
             }
         }
-        g += "\(pads)concat=n=\(n):v=1:a=\(hasAudio ? 1 : 0)[vc]" + (hasAudio ? "[aout]" : "") + ";[vc]\(evenScale)[vout]"
+        let tail = container.audioEncoder(ff.encoders)?.graphTail ?? "anull"
+        g += "\(pads)concat=n=\(n):v=1:a=\(hasAudio ? 1 : 0)[vc]" + (hasAudio ? "[ac]" : "") + ";[vc]\(evenScale)[vout]"
+            + (hasAudio ? ";[ac]\(tail)[aout]" : "")
         let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: false, allowAudioCopy: false)
         try await ff.runFirstSuccessful(plans, build: { plan in
             ["-i", input.path, "-filter_complex", g, "-map", "[vout]"] + (hasAudio ? ["-map", "[aout]"] : [])
@@ -278,10 +283,9 @@ extension FFmpegEngine {
                 pads += "[a\(i)]"
             }
         }
-        g += "\(pads)concat=n=\(inputs.count):v=1:a=\(anyAudio ? 1 : 0)[vout]" + (anyAudio ? "[aout]" : "")
-
         guard let ve = container.videoEncoder(ff.encoders) else { throw EngineError.missingTool("a \(srcFmt.displayName) video encoder in ffmpeg") }
         let ae = container.audioEncoder(ff.encoders)
+        g += "\(pads)concat=n=\(inputs.count):v=1:a=\(anyAudio ? 1 : 0)[vout]" + (anyAudio ? "[ac];[ac]\(ae?.graphTail ?? "anull")[aout]" : "")
         if anyAudio && ae == nil { throw EngineError.missingTool("a \(srcFmt.displayName) audio encoder in ffmpeg") }
         let audio: AudioChoice = anyAudio ? .encode(ae!, bitrate: nil) : .none
         var plans = [StreamPlan(video: .encode(ve, .auto), audio: audio)]

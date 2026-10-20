@@ -325,6 +325,62 @@ private func tool(_ id: ToolID, _ inputs: [URL], _ options: [String: OptionValue
     }
 }
 
+/// Regression: ffmpeg's native Vorbis encoder aborted (`floor_encode` assertion) when re-encoding
+/// decoded Vorbis, so every same-format tool on .ogg failed. Every audio tool on ogg + opus inputs.
+@Suite struct OggOpusRegressionTests {
+    static let toolCases: [(String, [String: OptionValue])] = [
+        ("audio.compress", ["percent": .double(40)]),
+        ("audio.normalize", [:]),
+        ("audio.trim", ["ranges": .ranges([0.2...1.4])]),
+        ("audio.bleep", ["ranges": .ranges([0.5...1.0])]),
+        ("audio.bleep", ["ranges": .ranges([0.5...1.0]), "tone": .bool(false)]),
+        ("audio.channels", ["channels": .string("mono")]),
+        ("audio.channels", ["channels": .string("stereo")]),
+        ("audio.channels", ["channels": .string("swap")]),
+        ("media.metadata.strip", [:]),
+    ]
+
+    static var inputs: [String] {
+        var names = ["tone.ogg", "tone.opus"]
+        for ext in ["ogg", "opus"] where FileManager.default.fileExists(atPath: smokeDir.appendingPathComponent("sample.\(ext)").path) {
+            names.append("smoke:sample.\(ext)")
+        }
+        return names
+    }
+
+    @Test(arguments: inputs, 0..<toolCases.count)
+    func audioTool(_ file: String, _ index: Int) async throws {
+        let (id, options) = Self.toolCases[index]
+        let input: URL = file.hasPrefix("smoke:")
+            ? smokeDir.appendingPathComponent(String(file.dropFirst(6)))
+            : try await Fixtures.shared.url(file)
+        let srcInfo = try await Probe.info(input)
+        if id == "audio.channels", options["channels"] == .string("swap"), srcInfo.audio?.channels != 2 { return }
+        let box = try Sandbox(); defer { box.cleanup() }
+        let p = ProgressRecorder()
+        let out = try await box.run(JobSpec(inputs: [input], operation: .tool(ToolID(id)), options: options), progress: p)
+        #expect(out[0].pathExtension == input.pathExtension)
+        let info = try await Probe.info(out[0])
+        #expect(["vorbis", "opus"].contains(info.audio?.codec ?? ""), "codec \(info.audio?.codec ?? "none")")
+        // Same-format tools keep Vorbis (the s16 workaround, not the Opus fallback) unless they need Opus.
+        let needsOpus = id == "audio.compress" || options["channels"] == .string("mono")
+        if input.pathExtension == "ogg" && !needsOpus {
+            #expect(info.audio?.codec == "vorbis")
+        }
+        #expect((info.duration ?? 0) > 0.5)
+        p.expectMonotonic()
+    }
+
+    @Test func extractToOggUsesVorbis() async throws {
+        let input = try await Fixtures.shared.url("clip.mp4")
+        let box = try Sandbox(); defer { box.cleanup() }
+        let out = try await box.run(JobSpec(inputs: [input], operation: .tool("video.audio.extract"), options: ["format": .string("ogg")]))
+        let info = try await Probe.info(out[0])
+        #expect(info.audio?.codec == "vorbis")
+        #expect(approx(info.duration, 2))
+    }
+}
+
 @Suite struct CancellationTests {
     /// Cancel as soon as ffmpeg reports progress; the job must throw and leave nothing behind.
     @Test(arguments: [

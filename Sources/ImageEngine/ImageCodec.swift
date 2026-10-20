@@ -52,7 +52,7 @@ enum ImageCodec {
         let props = (CGImageSourceCopyPropertiesAtIndex(src, index, nil) as? [String: Any]) ?? [:]
         let o = (props[kCGImagePropertyOrientation as String] as? NSNumber)?.uint32Value ?? 1
         let orientation = CGImagePropertyOrientation(rawValue: o) ?? .up
-        let image = ImageOps.oriented(raw, orientation)
+        let image = ImageOps.normalized(ImageOps.oriented(raw, orientation))
         let dpi = (props[kCGImagePropertyDPIWidth as String] as? NSNumber)?.doubleValue ?? 72
         return LoadedImage(
             image: image,
@@ -107,12 +107,18 @@ enum ImageCodec {
     static func write(_ image: CGImage, format: String, to url: URL, quality: Double?, properties: [String: Any] = [:],
                       tools: ToolLocator, scratch: URL) async throws {
         guard let type = ImageFormats.utType(format) else { throw EngineError.unsupported("writing \(format)") }
-        let prepared = ImageFormats.opaqueOnly.contains(format) ? ImageOps.flattened(image) : image
+        var prepared = ImageFormats.opaqueOnly.contains(format) ? ImageOps.flattened(image) : ImageOps.normalized(image)
+        if format == "bmp" { prepared = ImageOps.rgb8(prepared) }
         let q = ImageFormats.lossy.contains(format) ? quality : nil
         var imageIOError: Error?
         if ImageFormats.imageIOWritable.contains(type) {
             do {
                 try writeImageIO(prepared, type: type, to: url, quality: q, properties: properties)
+                // BMP is the format where ImageIO has written files it can't read back; verify it.
+                if format == "bmp" && !decodes(url) {
+                    try? FileManager.default.removeItem(at: url)
+                    throw EngineError.failed("BMP encode produced an unreadable file")
+                }
                 return
             } catch {
                 imageIOError = error
@@ -131,6 +137,11 @@ enum ImageCodec {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw EngineError.failed("magick produced no \(format) output")
         }
+    }
+
+    static func decodes(_ url: URL) -> Bool {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return false }
+        return CGImageSourceCreateImageAtIndex(src, 0, nil) != nil
     }
 
     static func magickPrefix(_ format: String) -> String {

@@ -90,7 +90,8 @@ enum PDFExport {
     // MARK: DOCX
 
     /// Page-by-page attributed text written as Office Open XML; pages separated by page breaks.
-    static func docx(_ doc: PDFDocument, ocr: Bool, progress: (Double) -> Void) throws -> Data {
+    /// nil when the document has no text at all (even after OCR).
+    static func docx(_ doc: PDFDocument, ocr: Bool, progress: (Double) -> Void) throws -> Data? {
         let result = NSMutableAttributedString()
         let n = doc.pageCount
         let bodyFont = NSFont.systemFont(ofSize: 12)
@@ -107,7 +108,8 @@ enum PDFExport {
             if !pageText.string.hasSuffix("\n") { result.append(NSAttributedString(string: "\n", attributes: [.font: bodyFont])) }
             progress(Double(i + 1) / Double(n) * 0.9)
         }
-        if result.length == 0 { result.append(NSAttributedString(string: " ", attributes: [.font: bodyFont])) }
+        let visible = result.string.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{0C}")))
+        guard !visible.isEmpty else { return nil }
         var attrs: [NSAttributedString.DocumentAttributeKey: Any] = [.documentType: NSAttributedString.DocumentType.officeOpenXML]
         if let title = doc.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String { attrs[.title] = title }
         if let author = doc.documentAttributes?[PDFDocumentAttribute.authorAttribute] as? String { attrs[.author] = author }

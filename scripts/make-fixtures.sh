@@ -96,4 +96,8 @@ cp "$OUT/sample.txt" "$OUT/sample.png" "$OUT/sample-folder/"
 (cd "$OUT" && tar -cf sample.tar sample-folder && tar -czf sample.tar.gz sample-folder)
 gzip -kc "$OUT/sample.txt" > "$OUT/sample.txt.gz"
 
+echo "qr…"
+swift build --product rondo-cli >/dev/null
+"$(swift build --show-bin-path)/rondo-cli" gen-qr "https://example.com/rondo-fixture" "$OUT/qr.png"
+
 echo "Fixtures in $OUT: $(ls "$OUT" | wc -l | tr -d ' ') entries, $(du -sh "$OUT" | cut -f1)"

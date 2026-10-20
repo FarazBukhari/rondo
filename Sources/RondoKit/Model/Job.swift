@@ -165,8 +165,10 @@ public struct ToolDescriptor: Hashable, Sendable, Identifiable {
     /// with the explicit options the editor produces.
     public let needsUI: Bool
     public let options: [OptionSpec]
+    /// Format ids this tool can't handle even though their kind is accepted (e.g. "svg" for image.compress).
+    public let rejectsFormats: Set<String>
 
-    public init(id: ToolID, title: String, symbol: String, accepts: Set<FileKind>, multiInput: MultiInput = .each, needsUI: Bool = false, options: [OptionSpec] = []) {
+    public init(id: ToolID, title: String, symbol: String, accepts: Set<FileKind>, multiInput: MultiInput = .each, needsUI: Bool = false, options: [OptionSpec] = [], rejectsFormats: Set<String> = []) {
         self.id = id
         self.title = title
         self.symbol = symbol
@@ -174,6 +176,7 @@ public struct ToolDescriptor: Hashable, Sendable, Identifiable {
         self.multiInput = multiInput
         self.needsUI = needsUI
         self.options = options
+        self.rejectsFormats = rejectsFormats
     }
 
     /// Default option values from the specs.

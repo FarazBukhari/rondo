@@ -98,10 +98,14 @@ extension FFmpegEngine {
             choices.append(.copy)
         }
         choices.append(.encode(enc, bitrate: bitrate))
+        if let fb = enc.fallback(ff.encoders) { choices.append(.encode(fb, bitrate: bitrate)) }
         try await ff.runFirstSuccessful(choices, build: { choice in
             var args = preInput + ["-i", input.path] + postInput
+            var required: [String] = []
+            if case .encode(let e, _) = choice { required = e.requiredFilters }
             if let filterComplex {
-                args += ["-filter_complex", filterComplex, "-map", "[aout]"]
+                let graph = required.isEmpty ? filterComplex : filterComplex + ";[aout]\(required.joined(separator: ","))[aenc]"
+                args += ["-filter_complex", graph, "-map", required.isEmpty ? "[aout]" : "[aenc]"]
             } else {
                 args += ["-map", "0:a:0"]
             }
@@ -110,7 +114,8 @@ extension FFmpegEngine {
             case .copy:
                 args += ["-c:a", "copy"]
             case .encode(let e, let b):
-                if !filters.isEmpty { args += ["-af", filters.joined(separator: ",")] }
+                let af = filterComplex == nil ? filters + e.requiredFilters : filters
+                if !af.isEmpty { args += ["-af", af.joined(separator: ",")] }
                 args += e.args(bitrate: b, source: a)
             case .none:
                 break

@@ -84,7 +84,7 @@ public struct FFmpegEngine: Engine {
             id: ToolIDs.videoCrop, title: "Crop", symbol: "crop",
             accepts: [.video], multiInput: .each, needsUI: true,
             options: [
-                OptionSpec(key: "rect", title: "Crop rectangle (x, y, w, h)", control: .text, defaultValue: nil),
+                OptionSpec(key: "rect", title: "Crop rectangle (x, y, w, h)", control: .rect, defaultValue: nil),
             ]),
         ToolDescriptor(
             id: ToolIDs.videoSpeed, title: "Change Speed", symbol: "speedometer",

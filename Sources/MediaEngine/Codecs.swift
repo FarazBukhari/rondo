@@ -129,6 +129,23 @@ enum AudioEncoder: Sendable, Hashable {
         }
     }
 
+    /// Filters that must run right before this encoder. ffmpeg's experimental native Vorbis
+    /// encoder aborts (`floor_encode` assertion) on some float input — e.g. decoded Vorbis or
+    /// gain-changed audio; quantizing through s16 first avoids it.
+    var requiredFilters: [String] {
+        self == .vorbisNative ? ["aformat=sample_fmts=s16", "aformat=sample_fmts=fltp"] : []
+    }
+
+    /// Filter chain for a `-filter_complex` audio tail (`[x]<tail>[y]`); never empty.
+    var graphTail: String {
+        requiredFilters.isEmpty ? "anull" : requiredFilters.joined(separator: ",")
+    }
+
+    /// Encoder to retry with when this one fails (Opus-in-Ogg for the fragile native Vorbis).
+    func fallback(_ enc: EncoderSet) -> AudioEncoder? {
+        self == .vorbisNative && enc.has(AudioEncoder.libopus.ffmpegName) ? .libopus : nil
+    }
+
     /// `bitrate` nil → encoder default quality.
     func args(bitrate: Int?, source: MediaInfo.Stream?) -> [String] {
         var a = ["-c:a", ffmpegName]
@@ -343,7 +360,8 @@ extension VideoContainer {
         case .copy:
             a += ["-c:a", "copy"]
         case .encode(let enc, let bitrate):
-            if !complexGraph && !audioFilters.isEmpty { a += ["-af", audioFilters.joined(separator: ",")] }
+            let af = audioFilters + enc.requiredFilters
+            if !complexGraph && !af.isEmpty { a += ["-af", af.joined(separator: ",")] }
             a += enc.args(bitrate: bitrate, source: info.audio)
         case .none:
             a += ["-an"]

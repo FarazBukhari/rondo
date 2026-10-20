@@ -54,8 +54,9 @@ public final class EngineRegistry: Sendable {
     public func tools(for inputs: [URL]) -> [ToolDescriptor] {
         guard !inputs.isEmpty else { return [] }
         let kinds = Set(inputs.map(FormatCatalog.kind(for:)))
+        let formats = Set(inputs.compactMap { FormatCatalog.format(for: $0)?.id })
         return allTools.filter { tool in
-            guard kinds.isSubset(of: tool.accepts) else { return false }
+            guard kinds.isSubset(of: tool.accepts), tool.rejectsFormats.isDisjoint(with: formats) else { return false }
             switch tool.multiInput {
             case .each: return true
             case .single: return inputs.count == 1

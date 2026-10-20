@@ -255,8 +255,9 @@ private let threePages = ["Alpha page one. The quick brown fox.", "Bravo page tw
         let out = try await PDFDocumentEngine().runTest(JobSpec(inputs: [src], operation: .tool("pdf.text.extract")))
         let text = try String(contentsOf: out[0], encoding: .utf8).uppercased()
         #expect(text.contains("RONDO") && text.contains("SCAN"), "OCR got: \(text)")
-        let off = try await PDFDocumentEngine().runTest(JobSpec(inputs: [src], operation: .tool("pdf.text.extract"), options: ["ocr": .bool(false)]))
-        #expect(try String(contentsOf: off[0], encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        await #expect(throws: EngineError.invalidInput("No text found in scan.pdf (OCR is off)")) {
+            _ = try await PDFDocumentEngine().runTest(JobSpec(inputs: [src], operation: .tool("pdf.text.extract"), options: ["ocr": .bool(false)]))
+        }
     }
 
     @Test func badInputsFailCleanly() async throws {
@@ -281,5 +282,40 @@ private let threePages = ["Alpha page one. The quick brown fox.", "Bravo page tw
         let r = try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/unzip"), ["-p", url.path, "a.txt"])
         #expect(r.stdout == String(repeating: "hello ", count: 200))
         #expect(CRC32.checksum(Data("123456789".utf8)) == 0xCBF4_3926)
+    }
+}
+
+@Suite struct PDFRegressionTests {
+    /// Smoke bug: image-only PDFs with no recoverable text committed empty .txt files.
+    @Test func textlessPDFCommitsNothing() async throws {
+        let dir = try PFx.dir("notext")
+        defer { PFx.cleanup(dir) }
+        let src = dir.appendingPathComponent("images.pdf")
+        let ctx = CGContext(data: nil, width: 120, height: 120, bitsPerComponent: 8, bytesPerRow: 0, space: PFx.sRGB,
+                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        ctx.setFillColor(CGColor(srgbRed: 0.2, green: 0.5, blue: 0.8, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 120, height: 120))
+        PFx.makePDF(["", ""], at: src, image: ctx.makeImage()!)
+        let e = PDFDocumentEngine()
+        let jobs: [JobSpec] = ["txt", "md", "docx", "epub"].map { JobSpec(inputs: [src], operation: .convert(to: $0)) }
+            + [JobSpec(inputs: [src], operation: .tool("pdf.text.extract"))]
+        for job in jobs {
+            do {
+                _ = try await e.runTest(job)
+                Issue.record("\(job.operation) should have failed")
+            } catch let err as EngineError {
+                #expect(err == .invalidInput("No text found in images.pdf (OCR found nothing either)"), "\(job.operation): \(err)")
+            }
+        }
+        do {
+            _ = try await e.runTest(JobSpec(inputs: [src], operation: .convert(to: "txt"), options: ["ocr": .bool(false)]))
+            Issue.record("ocr=false should fail too")
+        } catch let err as EngineError {
+            #expect(err == .invalidInput("No text found in images.pdf (OCR is off)"))
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["images.pdf"])
+        // Image outputs still work for the same file.
+        let png = try await e.runTest(JobSpec(inputs: [src], operation: .convert(to: "png"), options: ["dpi": .int(72)]))
+        #expect(png[0].lastPathComponent == "images (pages)")
     }
 }

@@ -1,5 +1,8 @@
+import CoreImage
 import Foundation
 import ImageEngine
+import ImageIO
+import UniformTypeIdentifiers
 import MediaEngine
 import PDFEngine
 import RondoKit
@@ -24,6 +27,7 @@ enum CLI {
       tool <tool.id> <file...> [--out <dir>] [--opt k=v ...]
       smoke <srcDir> <outDir> [--min 0.9] [--only <kind>]
       selftest                               quick core checks
+      gen-qr <text> <out.png>                write a QR code PNG (fixture helper)
 
     Option values: true/false → bool, 3 → int, 0.5 → double, 1,2,3 → list, 0-1.5,3-4 → ranges, else string.
     Outputs go beside the inputs unless --out is given.
@@ -42,6 +46,7 @@ enum CLI {
         case "tool": return await tool(rest)
         case "smoke": return await Smoke.run(rest)
         case "selftest": return await SelfTest.run()
+        case "gen-qr": return genQR(rest)
         case "help", "-h", "--help":
             print(usage)
             return 0
@@ -211,5 +216,24 @@ struct ArgParser {
             if numbers.count == parts.count { return .list(numbers) }
         }
         return .string(raw)
+    }
+}
+
+extension CLI {
+    static func genQR(_ args: [String]) -> Int32 {
+        guard args.count == 2, let filter = CIFilter(name: "CIQRCodeGenerator") else {
+            fputs("usage: rondo-cli gen-qr <text> <out.png>\n", stderr)
+            return 2
+        }
+        filter.setValue(Data(args[0].utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let qr = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)) else { return 1 }
+        let padded = qr.transformed(by: CGAffineTransform(translationX: 32, y: 32))
+            .composited(over: CIImage(color: .white).cropped(to: qr.extent.insetBy(dx: -32, dy: -32).offsetBy(dx: 32, dy: 32)))
+        let context = CIContext()
+        guard let cg = context.createCGImage(padded, from: padded.extent),
+              let dest = CGImageDestinationCreateWithURL(fileURL(args[1]) as CFURL, UTType.png.identifier as CFString, 1, nil) else { return 1 }
+        CGImageDestinationAddImage(dest, cg, nil)
+        return CGImageDestinationFinalize(dest) ? 0 : 1
     }
 }
