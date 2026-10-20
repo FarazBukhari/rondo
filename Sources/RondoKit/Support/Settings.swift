@@ -96,4 +96,23 @@ public struct Settings: Codable, Equatable, Sendable {
         launchAtLogin = get(.launchAtLogin, launchAtLogin)
         toolPaths = get(.toolPaths, toolPaths)
     }
+
+    /// Explicit so a cleared hotkey is written as `null` (synthesized encoding omits nil,
+    /// which would bring the default hotkey back on next load).
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(convertModifier, forKey: .convertModifier)
+        try c.encode(toolsModifier, forKey: .toolsModifier)
+        try c.encode(actionsModifier, forKey: .actionsModifier)
+        try c.encode(imageQuality, forKey: .imageQuality)
+        try c.encode(videoCRF, forKey: .videoCRF)
+        try c.encode(videoPreset, forKey: .videoPreset)
+        try c.encode(audioBitrateKbps, forKey: .audioBitrateKbps)
+        try c.encode(pdfRenderDPI, forKey: .pdfRenderDPI)
+        try c.encode(destination, forKey: .destination)
+        try c.encode(revealInFinder, forKey: .revealInFinder)
+        try c.encode(hotkey, forKey: .hotkey)
+        try c.encode(launchAtLogin, forKey: .launchAtLogin)
+        try c.encode(toolPaths, forKey: .toolPaths)
+    }
 }

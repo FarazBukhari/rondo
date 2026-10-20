@@ -136,6 +136,13 @@ struct StubEngine: Engine {
         #expect(s.imageQuality == Settings().imageQuality)
     }
 
+    @Test func clearedHotkeyStaysCleared() throws {
+        var s = Settings()
+        s.hotkey = nil
+        let decoded = try JSONDecoder().decode(Settings.self, from: JSONEncoder().encode(s))
+        #expect(decoded.hotkey == nil)
+    }
+
     @Test func modifierMapping() {
         let s = Settings()
         #expect(s.wheel(for: .shift) == .convert)

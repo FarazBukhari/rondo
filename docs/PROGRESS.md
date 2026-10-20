@@ -8,7 +8,7 @@ Updated by `/orchestrate`. A box is checked only after the orchestrator ran the 
 - [x] **P1 Scaffold + drag spike** — Package.swift with all targets, bundle/run scripts, menu-bar app launches, Finder drag → Shift → wheel spike
 - [x] **P2 Contracts** — RondoKit per ARCHITECTURE.md, unit tests
 - [ ] **P3 Workstreams** — W1 Interaction · W2 Shell+Actions · W3 Image+PDF · W4 Media · W5 Docs
-  - [x] W1  - [ ] W2  - [x] W3  - [x] W4  - [ ] W5
+  - [x] W1  - [x] W2  - [x] W3  - [x] W4  - [ ] W5
 - [ ] **P4 Integration** — registry wiring, app composition, rondo-cli, fixtures, smoke matrix
 - [ ] **P5 Tool windows** — W6 Image editor · W7 Media editor · W8 PDF organizer
   - [ ] W6  - [ ] W7  - [ ] W8

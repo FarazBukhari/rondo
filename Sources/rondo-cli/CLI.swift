@@ -1,10 +1,17 @@
 import Foundation
+import ImageEngine
+import MediaEngine
+import PDFEngine
 import RondoKit
 
 /// Same engine set as the app's composition root.
-/// P3 interim: engines are still being built in parallel; wired for real in P4.
+/// P3 interim: DocumentEngine (W5) joins in P4.
 func makeRegistry(tools: ToolLocator = ToolLocator()) -> EngineRegistry {
-    EngineRegistry(engines: [])
+    EngineRegistry(engines: [
+        RasterEngine(tools: tools),
+        PDFDocumentEngine(tools: tools),
+        FFmpegEngine(tools: tools),
+    ])
 }
 
 enum CLI {
