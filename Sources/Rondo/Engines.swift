@@ -1,3 +1,4 @@
+import DocEngine
 import Foundation
 import ImageEngine
 import MediaEngine
@@ -11,6 +12,7 @@ func makeRegistry(settings: Settings) -> (EngineRegistry, ToolLocator) {
         RasterEngine(tools: tools),
         PDFDocumentEngine(tools: tools),
         FFmpegEngine(tools: tools),
+        DocumentEngine(tools: tools),
     ])
     return (registry, tools)
 }

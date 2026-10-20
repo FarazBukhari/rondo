@@ -1,4 +1,5 @@
 import CoreImage
+import DocEngine
 import Foundation
 import ImageEngine
 import ImageIO
@@ -8,12 +9,12 @@ import PDFEngine
 import RondoKit
 
 /// Same engine set as the app's composition root.
-/// P3 interim: DocumentEngine (W5) joins in P4.
 func makeRegistry(tools: ToolLocator = ToolLocator()) -> EngineRegistry {
     EngineRegistry(engines: [
         RasterEngine(tools: tools),
         PDFDocumentEngine(tools: tools),
         FFmpegEngine(tools: tools),
+        DocumentEngine(tools: tools),
     ])
 }
 
@@ -96,7 +97,7 @@ enum CLI {
     }
 
     static func tool(_ args: [String]) async -> Int32 {
-        var p = ArgParser(args)
+        let p = ArgParser(args)
         guard let id = p.positionals.first else { fputs("tool: <tool.id> required\n", stderr); return 2 }
         let registry = makeRegistry()
         let toolID = ToolID(id)

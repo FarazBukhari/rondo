@@ -41,7 +41,9 @@ import Testing
         try await Task.sleep(nanoseconds: 300_000_000)
         task.cancel()
         let result = await task.result
-        #expect(Date().timeIntervalSince(start) < 5)
+        // Child sleeps 30 s; returning well before that proves it was killed. Loose bound: the full
+        // suite runs ffmpeg-heavy tests in parallel and can delay scheduling by seconds.
+        #expect(Date().timeIntervalSince(start) < 10)
         guard case .failure(let error) = result else {
             Issue.record("expected cancellation")
             return

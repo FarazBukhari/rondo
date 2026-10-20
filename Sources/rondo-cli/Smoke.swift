@@ -67,7 +67,6 @@ enum Smoke {
         for fixture in fixtures {
             let kind = FormatCatalog.kind(for: fixture)
             if let only, kind != only { continue }
-            let from = FormatCatalog.format(for: fixture)?.id ?? "?"
 
             let expectations = expectedErrors[fixture.lastPathComponent] ?? [:]
 
