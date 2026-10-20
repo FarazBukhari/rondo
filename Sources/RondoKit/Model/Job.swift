@@ -137,6 +137,9 @@ public struct OptionSpec: Hashable, Sendable {
         case text
         case bytes          // target file size
         case ranges         // time/page ranges
+        case rect           // list x,y,w,h (source pixels, top-left origin)
+        case list           // numeric list (page order, rotations, regions…)
+        case json           // structured payload as JSON string (annotation shapes)
     }
 
     public let key: String
