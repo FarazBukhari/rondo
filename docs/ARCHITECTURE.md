@@ -32,117 +32,33 @@ fixtures/ (generated, gitignored outputs in fixtures/out/)
 
 Dependency rule: every target → `RondoKit`. `*UI` targets → their engine too. `Rondo` and `rondo-cli` → everything they need. Nothing depends on `Rondo`.
 
-## Contracts (RondoKit) — implemented in phase 2
+## Contracts (RondoKit) — as built in P2
 
-Sketch; orchestrator may refine, but must update this file when it does.
+Source of truth is `Sources/RondoKit/**`; this is the map. Change only via the orchestrator.
 
-```swift
-public enum FileKind: String, Codable, CaseIterable, Sendable {
-    case image, video, audio, pdf, document, slides, spreadsheet, subtitle, archive, folder, unknown
-}
+| File | Public API |
+|------|-----------|
+| `Model/Format.swift` | `FileKind` (+ `symbol`, `isHeavy`), `Format` (`id`, `displayName`, `kind`, `extensions`, `utType`, `preferredExtension`) |
+| `Model/FormatCatalog.swift` | `FormatCatalog.all` (wheel order), `format(id:)`, `format(utType:)`, `format(for: URL)` (compound ext first, plain dirs → `folder`), `kind(for:)`, `rank(_:)` |
+| `Model/Job.swift` | `ToolID` (string literal), `ActionID` (+ `title`, `symbol`), `OptionValue` (`bool/int/double/string/ranges/list`), `Operation` (`.convert(to:)`, `.tool`), `Destination`, `JobSpec` (+ typed getters `bool/int/double/string/ranges/list`), `MultiInput` (`.each`, `.combine(minimum:)`, `.single`), `OptionSpec`, `ToolDescriptor` (+ `defaultOptions`), `ConversionDescriptor`, free func `conversions(from:to:)` (cartesian, skips identity) |
+| `Model/Wheel.swift` | `WheelKind`, `WheelPayload`, `WheelItem`, `WheelItemProvider`, `RegistryWheelItemProvider(registry:)` |
+| `Engine/Engine.swift` | `Engine` protocol (`id`, `conversions()`, `tools()`, `run(_:context:) async throws -> [URL]`), `JobContext` (`progress`, `log`, `tools`, `namer`, `tempDir`, `destination`, `tempFile(named:)`, `outputURL(for:ext:suffix:)`), `EngineError` (`unsupported/missingTool/invalidInput/failed`) |
+| `Engine/EngineRegistry.swift` | `EngineRegistry(engines:)`, `allConversions`, `allTools`, `supports(from:to:)`, `convertTargets(for:)`, `tools(for:)`, `tool(_:)`, `engine(for:)`, `refreshed()` |
+| `Queue/JobQueue.swift` | `JobEvent` (`queued/started/progress/finished/failed/cancelled`, `jobID`, `isTerminal`), `actor JobQueue(registry:heavyLimit:totalLimit:tools:)`: `subscribe()` (nonisolated, one stream per subscriber), `submit(_:) -> [UUID]`, `cancel(_:)`, `cancelAll()`, `activeCount` |
+| `Support/OutputNamer.swift` | `url(for:ext:suffix:destination:)`, `folder(for:suffix:destination:)`, `commit(_:to:)`, `static baseName(of:)`, `static unique(_:)` |
+| `Support/ToolLocator.swift` | `ToolLocator(overrides:bundleBin:)`, `fromSettings(_:)`, `url(for:)`, `has(_:)`, `require(_:) throws` |
+| `Support/ProcessRunner.swift` | `ProcessRunner.run(_:_:currentDirectory:environment:stdin:stdoutLine:checkExit:) async throws -> ProcessResult`; `ProcessError` (`exitCode`, `stderrTail`) |
+| `Support/TempDir.swift` | `TempDir.root`, `make(prefix:)`, `remove(_:)` (refuses paths outside root) |
+| `Support/Settings.swift` | `Settings` (lenient Codable, `load(from:)`, `save(to:)`, `wheel(for:)`), `ModifierKey`, `Hotkey` |
 
-public struct Format: Hashable, Codable, Sendable, Identifiable {
-    public let id: String            // canonical: "jpg", "heic", "mp4", "srt", "tar.gz"
-    public let displayName: String   // "JPEG"
-    public let kind: FileKind
-    public let extensions: [String]  // ["jpg", "jpeg"]
-    public let utType: String?       // "public.jpeg"
-}
-public enum FormatCatalog {          // single source of truth for ids/extensions
-    public static let all: [Format]
-    public static func format(for url: URL) -> Format?
-    public static func kind(for url: URL) -> FileKind
-}
+Behavior rules engines rely on:
 
-public struct ToolID: Hashable, Codable, Sendable, RawRepresentable { public let rawValue: String }   // "image.compress", "video.trim"
-public enum ActionID: String, Codable, Sendable, CaseIterable { case airdrop, float, copy, move, copyPath, terminal }
-
-public enum OptionValue: Hashable, Codable, Sendable {
-    case bool(Bool), int(Int), double(Double), string(String), ranges([ClosedRange<Double>])
-}
-
-public enum Operation: Hashable, Codable, Sendable {
-    case convert(to: String)         // Format.id
-    case tool(ToolID)
-}
-
-public enum Destination: Hashable, Codable, Sendable { case besideOriginal, folder(URL) }
-
-public struct JobSpec: Hashable, Codable, Sendable {
-    public var inputs: [URL]
-    public var operation: Operation
-    public var options: [String: OptionValue]
-    public var destination: Destination
-}
-
-public enum MultiInput: Sendable { case each, combine, single }
-
-public struct ToolDescriptor: Hashable, Sendable {
-    public let id: ToolID
-    public let title: String
-    public let symbol: String        // SF Symbol name
-    public let accepts: Set<FileKind>
-    public let multiInput: MultiInput
-    public let needsUI: Bool         // true → shell opens the matching editor window first
-    public let options: [OptionSpec] // for headless defaults + settings UI
-}
-
-public struct ConversionDescriptor: Hashable, Sendable { public let from: String; public let to: String }
-
-public struct JobContext: Sendable {
-    public let progress: @Sendable (Double) -> Void    // 0...1, monotonic
-    public let log: @Sendable (String) -> Void
-    public let tools: ToolLocator
-    public let namer: OutputNamer
-    public let tempDir: URL                             // per-job; engine writes here, namer moves into place
-}
-
-public protocol Engine: Sendable {
-    var id: String { get }
-    func conversions() -> [ConversionDescriptor]        // runtime-gated
-    func tools() -> [ToolDescriptor]                    // runtime-gated
-    func run(_ job: JobSpec, context: JobContext) async throws -> [URL]   // honors Task cancellation
-}
-
-public final class EngineRegistry: Sendable {
-    public init(engines: [any Engine])
-    public func convertTargets(for inputs: [URL]) -> [Format]     // intersection across inputs
-    public func tools(for inputs: [URL]) -> [ToolDescriptor]
-    public func engine(for job: JobSpec) -> (any Engine)?
-}
-
-public enum WheelKind: String, Codable, Sendable { case convert, tools, actions }
-public enum WheelPayload: Hashable, Sendable { case convert(String), tool(ToolID), action(ActionID) }
-public struct WheelItem: Identifiable, Hashable, Sendable { public let id: String; public let title: String; public let symbol: String; public let payload: WheelPayload }
-public protocol WheelItemProvider: Sendable { func items(for inputs: [URL], wheel: WheelKind) -> [WheelItem] }
-
-public enum JobEvent: Sendable {
-    case queued(UUID, JobSpec), progress(UUID, Double), finished(UUID, [URL]), failed(UUID, String), cancelled(UUID)
-}
-public actor JobQueue {
-    public init(registry: EngineRegistry, heavyLimit: Int = 2)
-    public func submit(_ spec: JobSpec) -> UUID
-    public func cancel(_ id: UUID)
-    public nonisolated var events: AsyncStream<JobEvent> { get }
-}
-
-public struct OutputNamer: Sendable {
-    public func url(for input: URL, ext: String, suffix: String?, destination: Destination) -> URL   // Finder-style " 2"
-    public func folder(for input: URL, suffix: String, destination: Destination) -> URL
-    public func commit(_ temp: URL, to final: URL) throws -> URL     // atomic move, re-resolves collisions
-}
-
-public struct ToolLocator: Sendable {
-    // order: bundle Contents/Resources/bin → Settings override → /usr/local/bin → /opt/homebrew/bin → $PATH
-    public func url(for tool: String) -> URL?
-}
-
-public enum ProcessRunner {
-    public static func run(_ exe: URL, _ args: [String],
-                           stdoutLine: (@Sendable (String) -> Void)? = nil) async throws -> ProcessResult
-    // terminates child on Task cancellation; captures stderr tail for errors
-}
-```
+- **Batch splitting:** the queue splits `.convert` and `.each` tools into one job per input and skips inputs already in the target format. `.combine`/`.single` tools get all inputs in one job.
+- **Batch targets:** `convertTargets` = formats reachable from every input (an input already in that format counts), excluding targets that no input needs.
+- **Outputs:** write into `context.tempFile(named:)`, then `context.namer.commit(temp, to: context.outputURL(for: input, ext:, suffix:))`. Multi-file results: build the folder in temp, commit it to `namer.folder(for:suffix:destination:)`.
+- **Progress:** call `context.progress` freely; the queue clamps, keeps it monotonic, rate-limits, and sends the final `1.0` itself.
+- **Cancellation:** `ProcessRunner` kills the child and throws `CancellationError`; long Swift loops call `try Task.checkCancellation()`. The queue deletes the job's temp dir.
+- **Tool option keys** (shared by engines, CLI `--opt k=v`, editors): `quality` (0…1), `percent` (0…100, size reduction), `targetBytes` (Int), `width`/`height` (px), `rect` (`list` x,y,w,h in source pixels, top-left origin), `ranges` (seconds or 1-based pages), `order` (`list`, 1-based pages), `speed` (Double), `dpi` (Int).
 
 ## App composition (phase 4)
 
@@ -150,7 +66,7 @@ public enum ProcessRunner {
 AppDelegate
  ├─ Settings (UserDefaults-backed)
  ├─ EngineRegistry([ImageEngine, PDFEngine, MediaEngine, DocEngine])
- ├─ JobQueue(registry)                 → events → ProgressHUD
+ ├─ JobQueue(registry)                 → subscribe() → ProgressHUD
  ├─ WheelItemProvider(registry, ActionID.allCases)
  ├─ DragMonitor ──(files + modifier tap)──▶ WheelPanel.present(inputs, at: cursor, kind, mode: .drag)
  ├─ StatusItem drop / Hotkey / Float drop ─▶ WheelPanel.present(..., mode: .click)
