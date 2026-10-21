@@ -21,7 +21,7 @@ ARCHS="$(lipo -archs build/Rondo.app/Contents/MacOS/Rondo)"
   awk -v v="$VERSION" '$0 ~ "^## \\[?"v"\\]?" {on=1; next} /^## / && on {exit} on' CHANGELOG.md
   echo
   echo "### Install"
-  echo "1. Download **Rondo-$VERSION.zip**, unzip, drag **Rondo.app** to Applications."
+  echo "1. \`brew install --cask farazbukhari/tap/rondo\`, or download **Rondo-$VERSION.zip**, unzip, drag **Rondo.app** to Applications."
   echo "2. First launch: macOS blocks apps that aren't notarized. Open **System Settings → Privacy & Security** and click **Open Anyway**, or run \`xattr -dr com.apple.quarantine /Applications/Rondo.app\`."
   echo "3. Optional helpers for video/audio and WebP/AVIF/SVG: \`brew install ffmpeg imagemagick\`."
   echo

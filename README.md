@@ -42,7 +42,11 @@ Everything runs on your Mac. Rondo makes no network requests and collects no ana
 
 ## Install
 
-1. Download **Rondo-x.y.z.zip** from [Releases](../../releases/latest), unzip it, and drag **Rondo.app** to **Applications**.
+1. With [Homebrew](https://brew.sh):
+   ```bash
+   brew install --cask farazbukhari/tap/rondo
+   ```
+   Or download **Rondo-x.y.z.zip** from [Releases](../../releases/latest), unzip it, and drag **Rondo.app** to **Applications**.
 2. **First launch.** Rondo is a free project and isn't notarized by Apple, so macOS blocks it the first time. Open **System Settings → Privacy & Security**, scroll to the message about Rondo, and click **Open Anyway**. Or in Terminal:
    ```bash
    xattr -dr com.apple.quarantine /Applications/Rondo.app
@@ -87,7 +91,14 @@ Local builds are ad-hoc signed. To keep macOS permission grants across rebuilds,
 ### Releasing
 
 1. Bump `CFBundleShortVersionString` in `Resources/Info.plist` and add a section to `CHANGELOG.md`.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`. The Release workflow builds a universal app, zips it, and publishes it with checksums and notes.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z`. The Release workflow builds a universal app, zips it, publishes it with checksums and notes, then bumps the cask in [FarazBukhari/homebrew-tap](https://github.com/FarazBukhari/homebrew-tap).
+
+The cask bump needs a repository secret `TAP_TOKEN` (one-time setup; without it the step is skipped):
+
+1. GitHub → Settings → Developer settings → Fine-grained tokens → **Generate new token**. Repository access: **Only select repositories** → `FarazBukhari/homebrew-tap`. Permissions → **Contents: Read and write**. Pick an expiration and renew it before it lapses.
+2. `gh secret set TAP_TOKEN -R FarazBukhari/rondo` and paste the token when prompted.
+
+Manual bump (no token): in a clone of the tap, set `version` and `sha256` in `Casks/rondo.rb` from the release's `.sha256` file, then `brew audit --cask --tap farazbukhari/tap` and push.
 
 ## Contributing
 
