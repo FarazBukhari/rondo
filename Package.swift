@@ -51,9 +51,9 @@ let package = Package(
         .testTarget(name: "DocEngineTests", dependencies: [kit, "DocEngine"]),
         .testTarget(name: "RondoInteractionTests", dependencies: [kit, "RondoInteraction"]),
         .testTarget(name: "RondoShellTests", dependencies: [kit, "RondoShell"]),
-        .testTarget(name: "ImageEditorUITests", dependencies: [kit, "ImageEditorUI"]),
-        .testTarget(name: "MediaEditorUITests", dependencies: [kit, "MediaEditorUI"]),
-        .testTarget(name: "PDFOrganizerUITests", dependencies: [kit, "PDFOrganizerUI"]),
+        .testTarget(name: "ImageEditorUITests", dependencies: [kit, "ImageEditorUI", "ImageEngine"]),
+        .testTarget(name: "MediaEditorUITests", dependencies: [kit, "MediaEditorUI", "MediaEngine"]),
+        .testTarget(name: "PDFOrganizerUITests", dependencies: [kit, "PDFOrganizerUI", "PDFEngine"]),
     ],
     swiftLanguageModes: [.v5]
 )

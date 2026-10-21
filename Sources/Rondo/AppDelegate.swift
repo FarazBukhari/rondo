@@ -1,5 +1,8 @@
 import AppKit
+import ImageEditorUI
+import MediaEditorUI
 import os
+import PDFOrganizerUI
 import RondoInteraction
 import RondoKit
 import RondoShell
@@ -60,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.log.notice("hotkey: \(error.localizedDescription, privacy: .public)")
         }
 
+        ImageEditor.tools = ToolLocator.fromSettings(settings)
         attachQueue()
         registerHotkey()
         dragMonitor.start()
@@ -67,6 +71,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        ImageEditor.closeAll()
+        MediaEditor.closeAll()
         dragMonitor.stop()
         hotkey.unregister()
         let queue = self.queue
@@ -115,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if hotkeyChanged { registerHotkey() }
         if toolsChanged {
             let (registry, tools) = makeRegistry(settings: new)
+            ImageEditor.tools = tools
             self.registry = registry
             wheel.itemProvider = RegistryWheelItemProvider(registry: registry)
             let old = queue
@@ -158,10 +165,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await queue.submit(spec) }
     }
 
-    /// P5 wires the image/media/PDF editors here. Returns false when no editor exists yet.
+    /// Opens the editor window for a `needsUI` tool. Editors never write files: they call back
+    /// with explicit options, which run through the queue like any other job.
+    /// Returns false when no editor handles the tool.
     private func openEditor(for tool: ToolDescriptor, urls: [URL]) -> Bool {
-        false
+        guard !urls.isEmpty else { return false }
+        let submit: ([URL], ToolID, [String: OptionValue]) -> Void = { [weak self] inputs, id, options in
+            self?.submit(.tool(id), urls: inputs, extra: options)
+        }
+        let id = tool.id.rawValue
+        // Image/media editors take one file each: open one window per file (capped).
+        let perFile = Array(urls.prefix(Self.maxEditorWindows))
+        if id.hasPrefix("image.") {
+            perFile.forEach { ImageEditor.open(url: $0, tool: tool.id, submit: submit) }
+        } else if id.hasPrefix("video.") || id.hasPrefix("audio.") {
+            perFile.forEach { MediaEditor.open(url: $0, tool: tool.id, submit: submit) }
+        } else if PDFOrganizer.supportedTools.contains(tool.id) {
+            PDFOrganizer.open(urls: urls, tool: tool.id, submit: submit)
+        } else {
+            return false
+        }
+        return true
     }
+
+    private static let maxEditorWindows = 5
 
     private func showMessage(_ title: String, detail: String?) {
         NSApp.activate(ignoringOtherApps: true)
