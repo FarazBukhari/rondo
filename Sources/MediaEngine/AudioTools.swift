@@ -11,7 +11,8 @@ struct SameFormat {
 }
 
 extension FFmpegEngine {
-    func sameFormat(_ input: URL, info: MediaInfo, ff: FFmpeg) throws -> SameFormat {
+    /// `job`'s `audioBitrate` (kbps), when given, overrides the source bitrate for lossy encoders.
+    func sameFormat(_ input: URL, info: MediaInfo, ff: FFmpeg, job: JobSpec) throws -> SameFormat {
         let f = try format(of: input)
         guard let target = AudioTarget.forFormat(f.id) else { throw EngineError.unsupported("\(f.displayName) audio") }
         let a = info.audio
@@ -20,15 +21,20 @@ extension FFmpegEngine {
         enc = enc ?? target.encoder(ff.encoders, source: a)
         guard let enc else { throw EngineError.missingTool("an \(f.displayName) audio encoder in ffmpeg") }
         var bitrate: Int?
-        if target.isLossy, enc.honorsBitrate, let src = a?.bitRate ?? info.totalBitRate {
-            bitrate = min(320_000, max(64_000, src / 1000 * 1000))
+        if target.isLossy, enc.honorsBitrate {
+            if let user = Quality(job).audioBitrate {
+                bitrate = user
+            } else if let src = a?.bitRate ?? info.totalBitRate {
+                bitrate = min(320_000, max(64_000, src / 1000 * 1000))
+            }
         }
         return SameFormat(format: f, target: target, encoder: enc, bitrate: bitrate)
     }
 
     // MARK: audio.compress
 
-    /// `percent` (default 50) or `targetBytes` (wins when > 0) → target bitrate.
+    /// `percent` (default 50) or `targetBytes` (wins when > 0) → target bitrate. With neither but an
+    /// `audioBitrate` (kbps) quality setting, that bitrate is the target.
     /// Lossy inputs keep their format; lossless inputs (WAV, AIFF, FLAC, ALAC) become AAC .m4a.
     func audioCompress(_ input: URL, job: JobSpec, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
         let info = try await ff.probe(input)
@@ -40,11 +46,14 @@ extension FFmpegEngine {
         let srcRate = a.bitRate ?? info.totalBitRate ?? 0
         let targetBytes = job.int("targetBytes", default: 0)
         var rate: Int
+        let userRate = Quality(job).audioBitrate
         if targetBytes > 0 {
             guard Int64(targetBytes) < info.fileSize else {
                 throw EngineError.invalidInput("\(input.lastPathComponent) is already smaller than the target size")
             }
             rate = Int(Double(targetBytes) * 8 * 0.97 / duration)
+        } else if job.options["percent"] == nil, let userRate {
+            rate = userRate
         } else {
             let p = min(95, max(1, job.double("percent", default: 50)))
             rate = Int(Double(srcRate) * (1 - p / 100))
@@ -63,7 +72,7 @@ extension FFmpegEngine {
         }
         guard let target else { throw EngineError.unsupported("\(f.displayName) compression") }
         let out = try await audioTranscode(input, info: info, target: target, ext: ext, allowCopy: false,
-                                           bitrate: rate, ff: ff, ctx: ctx, progress: progress)
+                                           bitrate: rate, strictBitrate: true, ff: ff, ctx: ctx, progress: progress)
         return try commit(out, to: ctx.outputURL(for: input, ext: ext, suffix: "compressed"), ctx: ctx)
     }
 
@@ -73,7 +82,7 @@ extension FFmpegEngine {
     func audioNormalize(_ input: URL, job: JobSpec, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
         let info = try await ff.probe(input)
         let a = try requireAudio(info, input)
-        let same = try sameFormat(input, info: info, ff: ff)
+        let same = try sameFormat(input, info: info, ff: ff, job: job)
         let I = min(-5, max(-70, job.double("lufs", default: -16)))
         let TP = min(0, max(-9, job.double("truePeak", default: -1.5)))
         let base = "loudnorm=I=\(fmtRatio(I)):TP=\(fmtRatio(TP)):LRA=11"
@@ -113,7 +122,7 @@ extension FFmpegEngine {
     func audioTrim(_ input: URL, job: JobSpec, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
         let info = try await ff.probe(input)
         _ = try requireAudio(info, input)
-        let same = try sameFormat(input, info: info, ff: ff)
+        let same = try sameFormat(input, info: info, ff: ff, job: job)
         let ranges = TimeRanges.normalize(job.ranges("ranges"), duration: info.duration)
         guard !ranges.isEmpty else { throw EngineError.invalidInput("Trim needs at least one time range inside the clip") }
         let ext = same.format.preferredExtension
@@ -145,7 +154,7 @@ extension FFmpegEngine {
     func audioBleep(_ input: URL, job: JobSpec, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
         let info = try await ff.probe(input)
         let a = try requireAudio(info, input)
-        let same = try sameFormat(input, info: info, ff: ff)
+        let same = try sameFormat(input, info: info, ff: ff, job: job)
         let ranges = TimeRanges.normalize(job.ranges("ranges"), duration: info.duration)
         guard !ranges.isEmpty else { throw EngineError.invalidInput("Bleep needs at least one time range inside the clip") }
         let expr = TimeRanges.betweenExpr(ranges)
@@ -178,7 +187,7 @@ extension FFmpegEngine {
     func audioChannels(_ input: URL, job: JobSpec, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
         let info = try await ff.probe(input)
         let a = try requireAudio(info, input)
-        let same = try sameFormat(input, info: info, ff: ff)
+        let same = try sameFormat(input, info: info, ff: ff, job: job)
         let mode = (job.string("channels") ?? "mono").lowercased()
         var filters: [String] = []
         var extra: [String] = []

@@ -41,10 +41,15 @@ import RondoKit
         #expect(DocumentEngine().tools().isEmpty)
     }
 
-    @Test func rarGatedOnProbe() {
+    @Test func rarGatedOnProbe() async {
         let tar = ToolLocator().url(for: "tar")
-        let readsRAR = tar.map(Probe.tarReadsRAR) ?? false
+        let readsRAR = tar.map(Probe.tarAdvertisesRAR) ?? false
         #expect(pairs.contains("rar>folder") == readsRAR)
+        #expect(Probe.libarchiveReadsRAR(versionOutput: "bsdtar 3.5.3 - libarchive 3.7.4 zlib/1.2.12"))
+        #expect(!Probe.libarchiveReadsRAR(versionOutput: "tar (GNU tar) 1.35"))
+        #expect(!Probe.libarchiveReadsRAR(versionOutput: "bsdtar 2.8.3 - libarchive 2.8.3"))
+        // Advertising must imply the real listing check passes.
+        if readsRAR, let tar { #expect(await Probe.verifyTarReadsRAR(tar)) }
     }
 
     @Test func slidesOnlyWithExporter() {
@@ -54,6 +59,27 @@ import RondoKit
             .filter { !$0.hasSuffix(">zip") && !$0.hasSuffix(">tar.gz") && !$0.hasSuffix(">gz") }
         #expect(slidePairs.isEmpty == !hasExporter)
         if hasExporter { #expect(slidePairs.contains("pptx>pdf")) }
+    }
+
+    @Test func firstConversionsCallIsFastAndSafeConcurrently() async {
+        let start = ContinuousClock.now
+        let counts = await withTaskGroup(of: Int.self) { group in
+            for _ in 0..<16 { group.addTask { DocumentEngine().conversions().count } }
+            return await group.reduce(into: Set<Int>()) { $0.insert($1) }
+        }
+        let elapsed = ContinuousClock.now - start
+        print("conversions() ×16 concurrent: \(elapsed)")
+        #expect(counts.count == 1, "all callers see the same capability set")
+        // Typically ~10 ms. Loose bound: the full suite saturates the machine with ffmpeg jobs,
+        // and this guards against deadlock / pool starvation, not micro-latency.
+        #expect(elapsed < .seconds(10))
+    }
+
+    @Test func syncProcessTimesOut() {
+        let start = ContinuousClock.now
+        #expect(SyncProcess.run(URL(fileURLWithPath: "/bin/sleep"), ["5"], timeout: 0.2) == nil)
+        #expect(ContinuousClock.now - start < .seconds(4))   // < the 5 s sleep: proves the kill under load
+        #expect(SyncProcess.run(URL(fileURLWithPath: "/bin/echo"), ["hi"], timeout: 2)?.output == "hi\n")
     }
 
     @Test func missingToolsHideConversions() {

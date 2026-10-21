@@ -290,4 +290,15 @@ import Testing
             #expect(m.submission()?.options["mode"] == .string("replace"))
         }
     }
+
+    /// A slow render of an older state must never replace a newer preview.
+    @Test func stalePreviewNeverOverwritesNewer() async {
+        let m = Self.model("image.redact")
+        m.redact.regions = [CGRect(x: 0, y: 0, width: 100, height: 100)]   // async job in flight
+        m.redact.style = .black
+        m.redact.color = .white
+        m.renderPreviewNow()                                                 // newer, synchronous
+        await m.waitForPreviews()
+        #expect(W6.pixel(m.displayImage!, 50, 50) == .white)
+    }
 }

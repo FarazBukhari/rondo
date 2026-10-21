@@ -7,6 +7,8 @@ extension FFmpegEngine {
     /// `percent` (0…100 size reduction, default 50) → single-pass ABR at that fraction of the
     /// source bitrate. `targetBytes` (> 0, wins over percent) → two-pass bitrate from duration
     /// minus the audio budget. Output keeps the input's container. Very low budgets downscale.
+    /// With neither but a `crf` quality setting → constant-quality re-encode (`preset`,
+    /// `audioBitrate` honored); fails rather than writing a file that isn't smaller.
     func videoCompress(_ input: URL, job: JobSpec, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
         let (srcFmt, container) = try videoContainer(of: input)
         let info = try await ff.probe(input)
@@ -14,8 +16,13 @@ extension FFmpegEngine {
         guard let duration = info.duration, duration > 0 else {
             throw EngineError.invalidInput("\(input.lastPathComponent) has no known duration")
         }
+        let q = Quality(job)
         let srcBytes = Double(info.fileSize)
         let targetBytes = job.int("targetBytes", default: 0)
+        if targetBytes <= 0, job.options["percent"] == nil, q.crf != nil {
+            return try await videoCompressQuality(input, info: info, format: srcFmt, container: container,
+                                                  quality: q, ff: ff, ctx: ctx, progress: progress)
+        }
         let twoPass = targetBytes > 0
         let totalBits: Double
         if twoPass {
@@ -34,6 +41,7 @@ extension FFmpegEngine {
             audioRate = min(128_000, max(48_000, a.bitRate ?? 128_000))
             if totalRate < 400_000 { audioRate = min(audioRate, 64_000) }
             if totalRate < 160_000 { audioRate = 32_000 }
+            if let cap = q.audioBitrate { audioRate = min(audioRate, cap) }
         }
         let videoRate = max(30_000, Int(totalRate) - audioRate)
 
@@ -62,7 +70,7 @@ extension FFmpegEngine {
 
         if twoPass && enc.supportsTwoPass {
             let passlog = ctx.tempFile(named: "pass").path
-            let videoArgs = vf + enc.args(rate: .bitrate(videoRate), info: info)
+            let videoArgs = vf + enc.args(rate: .bitrate(videoRate), info: info, quality: q)
             _ = try await ff.run(["-i", input.path, "-map", "0:V:0"] + videoArgs
                                  + ["-pass", "1", "-passlogfile", passlog, "-an", "-f", "null", "-"],
                                  duration: duration, progress: progress.sub(0, 0.45))
@@ -76,9 +84,29 @@ extension FFmpegEngine {
                 encoders.append(sw)
             }
             try await ff.runFirstSuccessful(encoders, build: { e in
-                ["-i", input.path] + videoMaps(info) + vf + e.args(rate: .bitrate(videoRate), info: info)
+                ["-i", input.path] + videoMaps(info) + vf + e.args(rate: .bitrate(videoRate), info: info, quality: q)
                     + audioArgs + container.mux + [out.path]
             }, duration: duration, progress: progress)
+        }
+        return try commit(out, to: ctx.outputURL(for: input, ext: srcFmt.preferredExtension, suffix: "compressed"), ctx: ctx)
+    }
+
+    /// Constant-quality compression: software CRF encoder when available (VideoToolbox otherwise),
+    /// audio at `audioBitrate` (default 128 kbps) but never above the source's.
+    func videoCompressQuality(_ input: URL, info: MediaInfo, format srcFmt: Format, container: VideoContainer,
+                              quality q: Quality, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
+        var audioRate: Int?
+        if let a = info.audio { audioRate = min(q.audioBitrate ?? 128_000, a.bitRate ?? .max) }
+        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: false, allowAudioCopy: false,
+                                        audioBitrate: audioRate, preferSoftware: true)
+        let out = ctx.tempFile(named: "out.\(srcFmt.preferredExtension)")
+        try await ff.runFirstSuccessful(plans, build: { plan in
+            ["-i", input.path] + videoMaps(info) + ["-map_metadata", "0"]
+                + container.codecArgs(plan, info: info, quality: q) + [out.path]
+        }, duration: info.duration, progress: progress)
+        let size = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        guard size > 0, size < info.fileSize else {
+            throw EngineError.invalidInput("\(input.lastPathComponent) can't be made smaller at CRF \(q.crf ?? 23); raise CRF or use a percentage")
         }
         return try commit(out, to: ctx.outputURL(for: input, ext: srcFmt.preferredExtension, suffix: "compressed"), ctx: ctx)
     }
@@ -94,23 +122,25 @@ extension FFmpegEngine {
         let ranges = TimeRanges.normalize(job.ranges("ranges"), duration: info.duration)
         guard !ranges.isEmpty else { throw EngineError.invalidInput("Trim needs at least one time range inside the clip") }
         let out = ctx.tempFile(named: "out.\(srcFmt.preferredExtension)")
+        let q = Quality(job)
         if ranges.count == 1 {
             try await cutVideo(input, info: info, container: container, range: ranges[0],
-                               precise: job.bool("precise", default: true), out: out, ff: ff, progress: progress)
+                               precise: job.bool("precise", default: true), quality: q, out: out, ff: ff, progress: progress)
         } else {
-            try await joinRanges(input, info: info, container: container, ranges: ranges, out: out, ff: ff, progress: progress)
+            try await joinRanges(input, info: info, container: container, ranges: ranges, quality: q, out: out, ff: ff, progress: progress)
         }
         return try commit(out, to: ctx.outputURL(for: input, ext: srcFmt.preferredExtension, suffix: "trimmed"), ctx: ctx)
     }
 
     /// One contiguous span into `out` (re-encoded when `precise`, else stream copy with re-encode fallback).
     func cutVideo(_ input: URL, info: MediaInfo, container: VideoContainer, range: ClosedRange<Double>,
-                  precise: Bool, out: URL, ff: FFmpeg, progress: ProgressSlice) async throws {
+                  precise: Bool, quality q: Quality, out: URL, ff: FFmpeg, progress: ProgressSlice) async throws {
         let length = range.upperBound - range.lowerBound
-        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: !precise, allowAudioCopy: !precise)
+        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: !precise, allowAudioCopy: !precise,
+                                        audioBitrate: q.audioBitrate)
         try await ff.runFirstSuccessful(plans, build: { plan in
             var args = ["-ss", fmt(range.lowerBound), "-i", input.path, "-t", fmt(length)] + videoMaps(info) + ["-map_metadata", "0"]
-            args += container.codecArgs(plan, info: info)
+            args += container.codecArgs(plan, info: info, quality: q)
             if plan.video == .copy || plan.audio == .copy { args += ["-avoid_negative_ts", "make_zero"] }
             return args + [out.path]
         }, duration: length, progress: progress)
@@ -118,7 +148,7 @@ extension FFmpegEngine {
 
     /// Several spans of one input, concatenated (always re-encoded).
     func joinRanges(_ input: URL, info: MediaInfo, container: VideoContainer, ranges: [ClosedRange<Double>],
-                    out: URL, ff: FFmpeg, progress: ProgressSlice) async throws {
+                    quality q: Quality, out: URL, ff: FFmpeg, progress: ProgressSlice) async throws {
         let n = ranges.count
         let hasAudio = info.audio != nil
         var g = "[0:V:0]split=\(n)" + (0..<n).map { "[vs\($0)]" }.joined() + ";"
@@ -132,13 +162,14 @@ extension FFmpegEngine {
                 pads += "[a\(i)]"
             }
         }
-        let tail = container.audioEncoder(ff.encoders)?.graphTail ?? "anull"
+        let tail = container.audioEncoder(ff.encoders, needsBitrateControl: q.audioBitrate != nil)?.graphTail ?? "anull"
         g += "\(pads)concat=n=\(n):v=1:a=\(hasAudio ? 1 : 0)[vc]" + (hasAudio ? "[ac]" : "") + ";[vc]\(evenScale)[vout]"
             + (hasAudio ? ";[ac]\(tail)[aout]" : "")
-        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: false, allowAudioCopy: false)
+        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: false, allowAudioCopy: false,
+                                        audioBitrate: q.audioBitrate)
         try await ff.runFirstSuccessful(plans, build: { plan in
             ["-i", input.path, "-filter_complex", g, "-map", "[vout]"] + (hasAudio ? ["-map", "[aout]"] : [])
-                + ["-map_metadata", "0"] + container.codecArgs(plan, info: info, complexGraph: true) + [out.path]
+                + ["-map_metadata", "0"] + container.codecArgs(plan, info: info, quality: q, complexGraph: true) + [out.path]
         }, duration: TimeRanges.totalLength(ranges), progress: progress)
     }
 
@@ -159,10 +190,12 @@ extension FFmpegEngine {
         let h = min(Int(rect[3].rounded()), size.height - y) / 2 * 2
         guard w >= 2, h >= 2 else { throw EngineError.invalidInput("Crop rectangle is empty") }
         let out = ctx.tempFile(named: "out.\(srcFmt.preferredExtension)")
-        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: false, allowAudioCopy: true)
+        let q = Quality(job)
+        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: false, allowAudioCopy: true,
+                                        audioBitrate: q.audioBitrate)
         try await ff.runFirstSuccessful(plans, build: { plan in
             ["-i", input.path] + videoMaps(info) + ["-map_metadata", "0"]
-                + container.codecArgs(plan, info: info, videoFilters: ["crop=\(w):\(h):\(x):\(y)"]) + [out.path]
+                + container.codecArgs(plan, info: info, quality: q, videoFilters: ["crop=\(w):\(h):\(x):\(y)"]) + [out.path]
         }, duration: info.duration, progress: progress)
         return try commit(out, to: ctx.outputURL(for: input, ext: srcFmt.preferredExtension, suffix: "cropped"), ctx: ctx)
     }
@@ -179,10 +212,12 @@ extension FFmpegEngine {
         let info = try await ff.probe(input)
         try requireVideo(info, input)
         let out = ctx.tempFile(named: "out.\(srcFmt.preferredExtension)")
-        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: false, allowAudioCopy: false)
+        let q = Quality(job)
+        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: false, allowAudioCopy: false,
+                                        audioBitrate: q.audioBitrate)
         try await ff.runFirstSuccessful(plans, build: { plan in
             ["-i", input.path] + videoMaps(info) + ["-map_metadata", "0"]
-                + container.codecArgs(plan, info: info,
+                + container.codecArgs(plan, info: info, quality: q,
                                       videoFilters: ["setpts=PTS/\(fmtRatio(speed))"],
                                       audioFilters: TimeRanges.atempoChain(speed)) + [out.path]
         }, duration: info.duration.map { $0 / speed }, progress: progress)
@@ -217,7 +252,8 @@ extension FFmpegEngine {
             try Task.checkCancellation()
             let number = String(repeating: "0", count: width - String(i + 1).count) + String(i + 1)
             let out = folder.appendingPathComponent("\(base) \(number).\(srcFmt.preferredExtension)")
-            try await cutVideo(input, info: info, container: container, range: r, precise: precise, out: out, ff: ff, progress: slices[i])
+            try await cutVideo(input, info: info, container: container, range: r, precise: precise,
+                               quality: Quality(job), out: out, ff: ff, progress: slices[i])
         }
         let final = ctx.namer.folder(for: input, suffix: "parts", destination: ctx.destination)
         return try commit(folder, to: final, ctx: ctx)
@@ -228,7 +264,8 @@ extension FFmpegEngine {
     /// Concatenates inputs in order into "<first> joined.<first ext>". Stream-copies with the concat
     /// demuxer when every input shares codecs/size/audio layout; otherwise re-encodes, letterboxing
     /// to the first clip's size and frame rate (silence fills clips without audio).
-    func videoJoin(_ inputs: [URL], ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
+    func videoJoin(_ inputs: [URL], job: JobSpec, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
+        let q = Quality(job)
         guard inputs.count >= 2, let first = inputs.first else { throw EngineError.invalidInput("Join needs at least 2 videos") }
         let (srcFmt, container) = try videoContainer(of: first)
         let probeSlice = progress.sub(0, 0.05)
@@ -284,17 +321,17 @@ extension FFmpegEngine {
             }
         }
         guard let ve = container.videoEncoder(ff.encoders) else { throw EngineError.missingTool("a \(srcFmt.displayName) video encoder in ffmpeg") }
-        let ae = container.audioEncoder(ff.encoders)
+        let ae = container.audioEncoder(ff.encoders, needsBitrateControl: q.audioBitrate != nil)
         g += "\(pads)concat=n=\(inputs.count):v=1:a=\(anyAudio ? 1 : 0)[vout]" + (anyAudio ? "[ac];[ac]\(ae?.graphTail ?? "anull")[aout]" : "")
         if anyAudio && ae == nil { throw EngineError.missingTool("a \(srcFmt.displayName) audio encoder in ffmpeg") }
-        let audio: AudioChoice = anyAudio ? .encode(ae!, bitrate: nil) : .none
+        let audio: AudioChoice = anyAudio ? .encode(ae!, bitrate: q.audioBitrate) : .none
         var plans = [StreamPlan(video: .encode(ve, .auto), audio: audio)]
         if ve.isHardware, let sw = container.videoEncoders.first(where: { !$0.isHardware && ff.encoders.has($0.rawValue) }) {
             plans.append(StreamPlan(video: .encode(sw, .auto), audio: audio))
         }
         try await ff.runFirstSuccessful(plans, build: { plan in
             inputArgs + ["-filter_complex", g, "-map", "[vout]"] + (anyAudio ? ["-map", "[aout]"] : [])
-                + container.codecArgs(plan, info: infos[0], complexGraph: true) + [out.path]
+                + container.codecArgs(plan, info: infos[0], quality: q, complexGraph: true) + [out.path]
         }, duration: total, progress: work)
         return try commit(out, to: ctx.outputURL(for: first, ext: srcFmt.preferredExtension, suffix: "joined"), ctx: ctx)
     }
@@ -364,7 +401,8 @@ extension FFmpegEngine {
             throw EngineError.invalidInput("unknown audio format \(requested)")
         }
         let out = try await audioTranscode(input, info: info, target: target, ext: dst.preferredExtension,
-                                           allowCopy: true, ff: ff, ctx: ctx, progress: progress)
+                                           allowCopy: true, bitrate: Quality(job).audioBitrate,
+                                           ff: ff, ctx: ctx, progress: progress)
         return try commit(out, to: ctx.outputURL(for: input, ext: dst.preferredExtension, suffix: "audio"), ctx: ctx)
     }
 

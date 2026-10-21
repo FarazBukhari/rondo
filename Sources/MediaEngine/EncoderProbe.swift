@@ -8,42 +8,78 @@ struct EncoderSet: Sendable {
 }
 
 /// Cached `ffmpeg -encoders` listing, keyed by ffmpeg path.
+///
+/// The probe never waits on Swift-concurrency work: it runs ffmpeg with Foundation `Process`
+/// on the calling thread (sync path) or on a GCD queue (async path), with a GCD kill timer.
+/// One probe at a time per process (behind `probeLock`), so concurrent first callers share it.
 enum EncoderProbe {
-    private static let lock = NSLock()
+    private static let cacheLock = NSLock()
+    private static let probeLock = NSLock()
     nonisolated(unsafe) private static var cache: [String: Set<String>] = [:]
+    nonisolated(unsafe) private static var spawned = 0
+
+    static let timeout: TimeInterval = 10
 
     static func cached(_ ffmpeg: URL) -> Set<String>? {
-        lock.withLock { cache[ffmpeg.path] }
+        cacheLock.withLock { cache[ffmpeg.path] }
     }
 
+    /// Number of ffmpeg probes actually spawned (tests).
+    static var spawnCount: Int { cacheLock.withLock { spawned } }
+
+    /// Drops the cache (tests).
+    static func resetCache() { cacheLock.withLock { cache.removeAll() } }
+
+    /// Async entry point: hops to a GCD thread so no cooperative-pool thread blocks on the subprocess.
     static func encoders(ffmpeg: URL) async -> Set<String> {
         if let hit = cached(ffmpeg) { return hit }
-        do {
-            let r = try await ProcessRunner.run(ffmpeg, ["-hide_banner", "-nostdin", "-encoders"])
-            let set = parse(r.stdout)
-            if !set.isEmpty { lock.withLock { cache[ffmpeg.path] = set } }
-            return set
-        } catch {
-            mediaLog.error("ffmpeg -encoders failed: \(error.localizedDescription, privacy: .public)")
-            return []
+        return await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                cont.resume(returning: encodersBlocking(ffmpeg: ffmpeg))
+            }
         }
     }
 
-    /// Synchronous variant for `conversions()` / `tools()`. Runs the probe on a detached task and
-    /// waits (bounded). A failed or timed-out probe is not cached, so the next call retries.
+    /// Synchronous probe for `conversions()` / `tools()`. Blocks only on the ffmpeg process.
+    /// Failed probes are not cached, so the next call retries.
     static func encodersBlocking(ffmpeg: URL) -> Set<String> {
         if let hit = cached(ffmpeg) { return hit }
-        let box = ResultBox()
-        let sem = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) {
-            box.set(await encoders(ffmpeg: ffmpeg))
-            sem.signal()
-        }
-        if sem.wait(timeout: .now() + 15) == .timedOut {
-            mediaLog.error("ffmpeg -encoders probe timed out")
+        probeLock.lock()
+        defer { probeLock.unlock() }
+        if let hit = cached(ffmpeg) { return hit }
+        cacheLock.withLock { spawned += 1 }
+        guard let output = runSync(ffmpeg, ["-hide_banner", "-nostdin", "-encoders"], timeout: timeout) else {
+            mediaLog.error("ffmpeg -encoders probe failed or timed out")
             return []
         }
-        return box.get()
+        let set = parse(output)
+        if !set.isEmpty { cacheLock.withLock { cache[ffmpeg.path] = set } }
+        return set
+    }
+
+    /// Runs a short-lived tool synchronously; SIGKILL after `timeout`. Nil on launch failure,
+    /// non-zero exit, or timeout.
+    static func runSync(_ executable: URL, _ arguments: [String], timeout: TimeInterval) -> String? {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+
+        let pid = process.processIdentifier
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + timeout)
+        timer.setEventHandler { if process.isRunning { kill(pid, SIGKILL) } }
+        timer.resume()
+
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        timer.cancel()
+        guard process.terminationReason == .exit, process.terminationStatus == 0 else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// Parses lines like ` V....D libx264              libx264 H.264 …` after the `------` separator.
@@ -59,12 +95,5 @@ enum EncoderProbe {
             names.insert(String(parts[1]))
         }
         return names
-    }
-
-    private final class ResultBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: Set<String> = []
-        func set(_ v: Set<String>) { lock.withLock { value = v } }
-        func get() -> Set<String> { lock.withLock { value } }
     }
 }

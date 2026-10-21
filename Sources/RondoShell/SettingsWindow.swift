@@ -292,10 +292,14 @@ private struct GeneralPane: View {
                 modifierPicker("Convert wheel", .convert)
                 modifierPicker("Tools wheel", .tools)
                 modifierPicker("Actions wheel", .actions)
+                Picker("Open the wheel", selection: model.binding(\.wheelTrigger)) {
+                    Text("As soon as the key goes down").tag(WheelTrigger.press)
+                    Text("On a quick tap (key released)").tag(WheelTrigger.tap)
+                }
             } header: {
                 Text("While dragging files, tap")
             } footer: {
-                Text("Each key opens one wheel; picking a key that's in use swaps the two.")
+                Text("Each key opens one wheel; picking a key that's in use swaps the two. Choose “quick tap” if you hold ⌥ while dragging to make Finder copy instead of move.")
                     .font(.caption).foregroundColor(.secondary)
             }
 

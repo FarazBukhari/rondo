@@ -46,6 +46,18 @@ public enum ProxyLoaderError: LocalizedError, Equatable {
     }
 }
 
+/// Blocking image work (decode, Core Image/CG renders) runs on a GCD queue, not the Swift cooperative pool:
+/// other jobs may tie up every cooperative thread (process waits, heavy engines) and starve the editor.
+enum EditorWork {
+    static let queue = DispatchQueue(label: "com.farazbukhari.rondo.image-editor.work", qos: .userInitiated, attributes: .concurrent)
+
+    static func run<T>(_ work: @escaping () -> T) async -> T {
+        await withCheckedContinuation { cont in
+            queue.async { cont.resume(returning: work()) }
+        }
+    }
+}
+
 public enum ProxyLoader {
     /// Long-edge cap for the on-screen proxy.
     public static let maxPixel = 2048
@@ -58,7 +70,7 @@ public enum ProxyLoader {
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue,
               FileManager.default.isReadableFile(atPath: url.path) else { throw ProxyLoaderError.missing(name) }
         let fmt = FormatCatalog.format(for: url)?.id
-        if fmt != "svg", let p = loadImageIO(url, maxPixel: maxPixel) { return p }
+        if fmt != "svg", let p = await EditorWork.run({ loadImageIO(url, maxPixel: maxPixel) }) { return p }
         guard let magick = tools.url(for: "magick") else {
             throw fmt == "svg" ? ProxyLoaderError.needsMagick(url.lastPathComponent) : ProxyLoaderError.unreadable(url.lastPathComponent)
         }
@@ -79,7 +91,7 @@ public enum ProxyLoader {
             editorLog.error("magick decode failed for \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
             throw ProxyLoaderError.unreadable(name)
         }
-        guard let p = loadImageIO(out, maxPixel: maxPixel) else { throw ProxyLoaderError.unreadable(name) }
+        guard let p = await EditorWork.run({ loadImageIO(out, maxPixel: maxPixel) }) else { throw ProxyLoaderError.unreadable(name) }
         return p
     }
 

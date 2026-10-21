@@ -101,60 +101,118 @@ enum DocSupport {
     }
 }
 
-// MARK: - Probes (cached, bounded, safe to call from conversions())
+// MARK: - Probes
 
+/// Capability probes. The synchronous path (used by `conversions()`) never touches Swift concurrency:
+/// it runs Foundation `Process` on the calling thread with a hard kill timeout, cached once per key
+/// behind a lock so concurrent first callers wait for one probe instead of spawning their own.
 enum Probe {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cache: [String: Bool] = [:]
 
-    static func cached(_ key: String) -> Bool? { lock.withLock { cache[key] } }
-    static func store(_ key: String, _ value: Bool) { lock.withLock { cache[key] = value } }
-
-    /// Runs an async probe on a detached task and waits at most `timeout` seconds.
-    /// Timed-out probes report false and aren't cached (the next call retries).
-    static func blocking(_ key: String, timeout: Double = 5, _ body: @escaping @Sendable () async -> Bool) -> Bool {
-        if let hit = cached(key) { return hit }
-        let box = Box()
-        let sem = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) {
-            box.set(await body())
-            sem.signal()
-        }
-        guard sem.wait(timeout: .now() + timeout) == .success else {
-            docLog.error("probe \(key, privacy: .public) timed out")
-            return false
-        }
-        let v = box.get()
-        store(key, v)
+    /// Computes `key` once (the lock is held while computing). `nil` from `compute` (e.g. a timeout) is not cached.
+    static func once(_ key: String, _ compute: () -> Bool?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if let hit = cache[key] { return hit }
+        guard let v = compute() else { return false }
+        cache[key] = v
         return v
     }
 
-    /// bsdtar (libarchive) reads RAR. Verified by listing a tiny generated RAR4 archive.
-    static func tarReadsRAR(_ tar: URL) -> Bool {
-        blocking("rar:" + tar.path) {
-            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rondo-rar-probe-\(UUID().uuidString)")
-            defer { try? FileManager.default.removeItem(at: dir) }
-            do {
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                let rar = dir.appendingPathComponent("probe.rar")
-                try RAR4Writer.archive(entries: [("probe.txt", Data("ok".utf8))]).write(to: rar)
-                let r = try await ProcessRunner.run(tar, ["-tf", rar.path])
-                return r.stdout.contains("probe.txt")
-            } catch {
-                return false
-            }
+    static func cached(_ key: String) -> Bool? { lock.withLock { cache[key] } }
+    static func store(_ key: String, _ value: Bool) { lock.withLock { cache[key] = value } }
+
+    /// Cheap advertising check: `tar` is bsdtar on libarchive ≥ 3 (RAR reader built in since 3.0).
+    /// One `tar --version` spawn, ~10 ms, cached.
+    static func tarAdvertisesRAR(_ tar: URL) -> Bool {
+        once("rar-version:" + tar.path) {
+            guard let r = SyncProcess.run(tar, ["--version"], timeout: 3) else { return nil }
+            guard r.status == 0 else { return false }
+            return libarchiveReadsRAR(versionOutput: r.output)
         }
     }
 
-    final class Box: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value = false
-        func set(_ v: Bool) { lock.withLock { value = v } }
-        func get() -> Bool { lock.withLock { value } }
+    static func libarchiveReadsRAR(versionOutput s: String) -> Bool {
+        guard s.contains("bsdtar"),
+              let r = s.range(of: #"libarchive (\d+)\."#, options: .regularExpression) else { return false }
+        let major = Int(s[r].dropFirst("libarchive ".count).prefix { $0.isNumber }) ?? 0
+        return major >= 3
+    }
+
+    /// Real check, run lazily by the first RAR job: list a tiny generated RAR4 archive. Async (ProcessRunner), cached.
+    static func verifyTarReadsRAR(_ tar: URL) async -> Bool {
+        let key = "rar-listing:" + tar.path
+        if let hit = cached(key) { return hit }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rondo-rar-probe-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var ok = false
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let rar = dir.appendingPathComponent("probe.rar")
+            try RAR4Writer.archive(entries: [("probe.txt", Data("ok".utf8))]).write(to: rar)
+            let r = try await ProcessRunner.run(tar, ["-tf", rar.path], checkExit: false)
+            ok = r.exitCode == 0 && r.stdout.contains("probe.txt")
+        } catch is CancellationError {
+            return false   // not cached; the next job retries
+        } catch {
+            ok = false
+        }
+        store(key, ok)
+        return ok
     }
 }
 
-// MARK: - Tiny RAR 4.x writer (stored entries only) — used for the RAR capability probe and tests.
+/// Blocking subprocess for capability probes only (jobs use `ProcessRunner`). Runs on the calling thread;
+/// output is drained on a GCD queue; the child gets SIGTERM at `timeout`, SIGKILL 1 s later.
+enum SyncProcess {
+    struct Result {
+        let status: Int32
+        let output: String
+    }
+
+    /// nil when the tool can't launch or timed out.
+    static func run(_ exe: URL, _ args: [String], timeout: TimeInterval) -> Result? {
+        let p = Process()
+        p.executableURL = exe
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in exited.signal() }
+        do { try p.run() } catch { return nil }
+
+        let output = DataBox()
+        let drained = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            output.set(pipe.fileHandleForReading.readDataToEndOfFile())
+            drained.signal()
+        }
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            docLog.error("probe \(exe.lastPathComponent, privacy: .public) timed out")
+            p.terminate()
+            if exited.wait(timeout: .now() + 1) == .timedOut {
+                kill(p.processIdentifier, SIGKILL)
+                exited.wait()
+            }
+            _ = drained.wait(timeout: .now() + 1)
+            return nil
+        }
+        _ = drained.wait(timeout: .now() + 1)
+        return Result(status: p.terminationStatus, output: String(decoding: output.get(), as: UTF8.self))
+    }
+
+    final class DataBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+        func set(_ d: Data) { lock.withLock { data = d } }
+        func get() -> Data { lock.withLock { data } }
+    }
+}
+
+// MARK: - Tiny RAR 4.x writer (stored entries only) — used for the lazy RAR check and tests.
 
 enum RAR4Writer {
     static func archive(entries: [(name: String, data: Data)]) -> Data {

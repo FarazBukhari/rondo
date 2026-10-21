@@ -9,11 +9,11 @@ extension FFmpegEngine {
         case .video where target == "gif":
             return try await videoToGIF(input, job: job, ff: ff, ctx: ctx, progress: progress)
         case .video where VideoContainer.outputIDs.contains(target):
-            return try await videoToVideo(input, to: dst, ff: ff, ctx: ctx, progress: progress)
+            return try await videoToVideo(input, to: dst, job: job, ff: ff, ctx: ctx, progress: progress)
         case .video where target == "mp3":
-            return try await mediaToAudio(input, to: dst, ff: ff, ctx: ctx, progress: progress)
+            return try await mediaToAudio(input, to: dst, job: job, ff: ff, ctx: ctx, progress: progress)
         case .audio where AudioTarget.forFormat(target) != nil:
-            return try await mediaToAudio(input, to: dst, ff: ff, ctx: ctx, progress: progress)
+            return try await mediaToAudio(input, to: dst, job: job, ff: ff, ctx: ctx, progress: progress)
         default:
             throw EngineError.unsupported("\(src.displayName) → \(dst.displayName)")
         }
@@ -21,15 +21,18 @@ extension FFmpegEngine {
 
     // MARK: Video → video
 
-    func videoToVideo(_ input: URL, to dst: Format, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
+    /// Honors `crf`, `preset`, `audioBitrate` for re-encoded streams; copied streams stay copies.
+    func videoToVideo(_ input: URL, to dst: Format, job: JobSpec, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
         guard let container = VideoContainer.forFormat(dst.id) else { throw EngineError.unsupported(dst.displayName) }
         let info = try await ff.probe(input)
         try requireVideo(info, input)
+        let q = Quality(job)
         let out = ctx.tempFile(named: "out.\(dst.preferredExtension)")
-        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: true, allowAudioCopy: true)
+        let plans = try container.plans(info: info, encoders: ff.encoders, allowVideoCopy: true, allowAudioCopy: true,
+                                        audioBitrate: q.audioBitrate)
         try await ff.runFirstSuccessful(plans, build: { plan in
             ["-i", input.path] + videoMaps(info) + ["-map_metadata", "0"]
-                + container.codecArgs(plan, info: info) + [out.path]
+                + container.codecArgs(plan, info: info, quality: q) + [out.path]
         }, duration: info.duration, progress: progress)
         return try commit(out, to: ctx.outputURL(for: input, ext: dst.preferredExtension), ctx: ctx)
     }
@@ -59,17 +62,20 @@ extension FFmpegEngine {
 
     // MARK: Audio / video → audio
 
-    func mediaToAudio(_ input: URL, to dst: Format, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
+    /// `audioBitrate` (kbps) sets lossy encoders' bitrate; lossless targets ignore it.
+    func mediaToAudio(_ input: URL, to dst: Format, job: JobSpec, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> URL {
         guard let target = AudioTarget.forFormat(dst.id) else { throw EngineError.unsupported(dst.displayName) }
         let info = try await ff.probe(input)
         _ = try requireAudio(info, input)
         let out = try await audioTranscode(input, info: info, target: target, ext: dst.preferredExtension,
-                                           allowCopy: true, ff: ff, ctx: ctx, progress: progress)
+                                           allowCopy: true, bitrate: Quality(job).audioBitrate,
+                                           ff: ff, ctx: ctx, progress: progress)
         return try commit(out, to: ctx.outputURL(for: input, ext: dst.preferredExtension), ctx: ctx)
     }
 
     /// Transcodes the first audio stream to `target` into a temp file and returns it.
     /// `filterComplex` must expose an `[aout]` pad. Copy is tried first when allowed and no filters apply.
+    /// `strictBitrate` → pick an encoder that honors `-b:a` (size budgets), e.g. Opus over native Vorbis.
     func audioTranscode(
         _ input: URL,
         info: MediaInfo,
@@ -78,6 +84,7 @@ extension FFmpegEngine {
         allowCopy: Bool,
         encoder: AudioEncoder? = nil,
         bitrate: Int? = nil,
+        strictBitrate: Bool = false,
         filters: [String] = [],
         filterComplex: String? = nil,
         preInput: [String] = [],
@@ -89,7 +96,7 @@ extension FFmpegEngine {
         progress: ProgressSlice
     ) async throws -> URL {
         let a = try requireAudio(info, input)
-        guard let enc = encoder ?? target.encoder(ff.encoders, source: a, needsBitrateControl: bitrate != nil) else {
+        guard let enc = encoder ?? target.encoder(ff.encoders, source: a, needsBitrateControl: strictBitrate) else {
             throw EngineError.missingTool("an \(target.id.uppercased()) audio encoder in ffmpeg")
         }
         let out = ctx.tempFile(named: "out.\(ext)")

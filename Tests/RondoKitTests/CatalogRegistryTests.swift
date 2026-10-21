@@ -145,6 +145,14 @@ struct StubEngine: Engine {
         #expect(s.imageQuality == Settings().imageQuality)
     }
 
+    @Test func wheelTriggerRoundTripsAndDefaults() throws {
+        var s = Settings()
+        #expect(s.wheelTrigger == .press)
+        s.wheelTrigger = .tap
+        #expect(try JSONDecoder().decode(Settings.self, from: JSONEncoder().encode(s)).wheelTrigger == .tap)
+        #expect(try JSONDecoder().decode(Settings.self, from: Data("{}".utf8)).wheelTrigger == .press)
+    }
+
     @Test func clearedHotkeyStaysCleared() throws {
         var s = Settings()
         s.hotkey = nil

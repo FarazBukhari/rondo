@@ -31,7 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let (registry, tools) = makeRegistry(settings: settings)
         self.registry = registry
         queue = JobQueue(registry: registry, tools: tools)
-        dragMonitor = DragMonitor(settings: settings)
+        dragMonitor = DragMonitor(settings: settings, policy: Self.policy(for: settings))
         wheel = WheelPanel(itemProvider: RegistryWheelItemProvider(registry: registry))
         statusItem = StatusItemController(recents: recents)
         super.init()
@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         attachQueue()
         registerHotkey()
         dragMonitor.start()
+        showWelcomeIfFirstLaunch()
         log.notice("Rondo launched: \(self.registry.allConversions.count) conversions, \(self.registry.allTools.count) tools")
     }
 
@@ -118,6 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hotkeyChanged = new.hotkey != settings.hotkey
         settings = new
         dragMonitor.settings = new
+        dragMonitor.policy = Self.policy(for: new)
         if hotkeyChanged { registerHotkey() }
         if toolsChanged {
             let (registry, tools) = makeRegistry(settings: new)
@@ -189,6 +191,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static let maxEditorWindows = 5
+    private static let welcomeShownKey = "welcomeShown.v1"
+
+    /// One-time hint: Rondo lives in the menu bar and is driven by drag + modifier keys.
+    private func showWelcomeIfFirstLaunch() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.welcomeShownKey) else { return }
+        defaults.set(true, forKey: Self.welcomeShownKey)
+        let s = settings
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Rondo is in your menu bar"
+        alert.informativeText = """
+        Drag any file, and while dragging tap:
+          \(s.convertModifier.symbol)  Convert   ·   \(s.toolsModifier.symbol)  Tools   ·   \(s.actionsModifier.symbol)  Actions
+        Drop on a slice. Results are saved next to the original — originals are never changed.
+
+        You can also drop files on the menu-bar icon, or select files in Finder and press the keyboard shortcut.
+        """
+        alert.addButton(withTitle: "Got It")
+        alert.addButton(withTitle: "Open Settings…")
+        if alert.runModal() == .alertSecondButtonReturn {
+            settingsWindow.show()
+        }
+    }
+
+    private static func policy(for settings: Settings) -> ModifierTriggerPolicy {
+        settings.wheelTrigger == .tap ? .standardTap : .press
+    }
 
     private func showMessage(_ title: String, detail: String?) {
         NSApp.activate(ignoringOtherApps: true)

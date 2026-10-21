@@ -108,7 +108,7 @@ import RondoKit
     }
 
     @Test func rarExtractionWhenSupported() async throws {
-        guard let tar = ToolLocator().url(for: "tar"), Probe.tarReadsRAR(tar) else { return }
+        guard let tar = ToolLocator().url(for: "tar"), Probe.tarAdvertisesRAR(tar) else { return }
         let dir = try W5.dir("arch-rar")
         let rar = dir.appendingPathComponent("pack.rar")
         try RAR4Writer.archive(entries: [("a.txt", Data("rar a".utf8)), ("b.txt", Data("rar b".utf8))]).write(to: rar)

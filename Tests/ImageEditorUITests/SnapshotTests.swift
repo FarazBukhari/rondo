@@ -12,7 +12,9 @@ import Testing
     static let sceneURL = URL(fileURLWithPath: "/tmp/sunset-hills.png")
 
     /// Hosts the real SwiftUI editor in an off-screen window and caches its display at 1×.
-    static func render(_ model: ImageEditorModel, appearance: NSAppearance.Name, name: String) throws -> NSBitmapImageRep {
+    static func render(_ model: ImageEditorModel, appearance: NSAppearance.Name, name: String) async throws -> NSBitmapImageRep {
+        await model.waitForPreviews()
+        model.renderPreviewNow()
         let host = NSHostingView(rootView: ImageEditorView(model: model))
         host.frame = NSRect(origin: .zero, size: size)
         // cacheDisplay skips the window frame, so paint the window background ourselves.
@@ -23,10 +25,12 @@ import Testing
         window.appearance = NSAppearance(named: appearance)
         window.contentView = backdrop
         model.canvasSize = CGSize(width: size.width - 277, height: size.height - 100)
+        // Let SwiftUI settle by yielding the main actor (no nested run loop).
         for _ in 0..<3 {
             host.layoutSubtreeIfNeeded()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            try await Task.sleep(nanoseconds: 50_000_000)
         }
+        host.layoutSubtreeIfNeeded()
         let rep = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
                                                 bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
@@ -55,32 +59,32 @@ import Testing
         #expect(differs, "\(name): canvas looks empty (probe \(probe), bg \(bg))")
     }
 
-    @Test func cropStates() throws {
+    @Test func cropStates() async throws {
         let light = Self.make("image.crop")
         light.crop.setAspect(.r16x9)
         light.crop.rect = CropMath.maxRect(ratio: 16.0 / 9, in: CGSize(width: 1200, height: 900), center: CGPoint(x: 820, y: 520))
-        Self.expectCanvasDrew(try Self.render(light, appearance: .aqua, name: "crop-light"), "crop-light")
+        Self.expectCanvasDrew(try await Self.render(light, appearance: .aqua, name: "crop-light"), "crop-light")
 
         let dark = Self.make("image.crop")
         dark.crop.rotateClockwise()
         dark.crop.flipHorizontal()
         dark.crop.rect = CGRect(x: 120, y: 260, width: 640, height: 900)
-        Self.expectCanvasDrew(try Self.render(dark, appearance: .darkAqua, name: "crop-dark"), "crop-dark")
+        Self.expectCanvasDrew(try await Self.render(dark, appearance: .darkAqua, name: "crop-dark"), "crop-dark")
     }
 
-    @Test func adjustStates() throws {
+    @Test func adjustStates() async throws {
         let light = Self.make("image.adjust")
         light.adjust.exposure = 0.35
         light.adjust.saturation = 1.5
         light.adjust.temperature = 8200
         light.renderPreviewNow()
-        Self.expectCanvasDrew(try Self.render(light, appearance: .aqua, name: "adjust-light"), "adjust-light")
+        Self.expectCanvasDrew(try await Self.render(light, appearance: .aqua, name: "adjust-light"), "adjust-light")
 
         let dark = Self.make("image.adjust")
         dark.adjust.filter = "noir"
         dark.adjust.contrast = 1.4
         dark.renderPreviewNow()
-        Self.expectCanvasDrew(try Self.render(dark, appearance: .darkAqua, name: "adjust-dark"), "adjust-dark")
+        Self.expectCanvasDrew(try await Self.render(dark, appearance: .darkAqua, name: "adjust-dark"), "adjust-dark")
     }
 
     static func annotated() -> ImageEditorModel {
@@ -98,53 +102,53 @@ import Testing
         return m
     }
 
-    @Test func annotateStates() throws {
+    @Test func annotateStates() async throws {
         let light = Self.annotated()
         light.annotateTool = .rect
         light.selectedAnnotationID = light.annotations[0].id
-        Self.expectCanvasDrew(try Self.render(light, appearance: .aqua, name: "annotate-light"), "annotate-light")
+        Self.expectCanvasDrew(try await Self.render(light, appearance: .aqua, name: "annotate-light"), "annotate-light")
         let dark = Self.annotated()
         dark.annotateTool = .text
         dark.selectedAnnotationID = dark.annotations[5].id
-        Self.expectCanvasDrew(try Self.render(dark, appearance: .darkAqua, name: "annotate-dark"), "annotate-dark")
+        Self.expectCanvasDrew(try await Self.render(dark, appearance: .darkAqua, name: "annotate-dark"), "annotate-dark")
     }
 
-    @Test func redactStates() throws {
+    @Test func redactStates() async throws {
         let light = Self.make("image.redact")
         light.redact.regions = [CGRect(x: 120, y: 780, width: 560, height: 160), CGRect(x: 980, y: 540, width: 300, height: 260)]
         light.redact.style = .pixelate
         light.selectedRegion = 1
         light.renderPreviewNow()
-        Self.expectCanvasDrew(try Self.render(light, appearance: .aqua, name: "redact-light"), "redact-light")
+        Self.expectCanvasDrew(try await Self.render(light, appearance: .aqua, name: "redact-light"), "redact-light")
 
         let dark = Self.make("image.redact")
         dark.redact.regions = [CGRect(x: 100, y: 80, width: 640, height: 120)]
         dark.redact.style = .black
         dark.selectedRegion = 0
         dark.renderPreviewNow()
-        Self.expectCanvasDrew(try Self.render(dark, appearance: .darkAqua, name: "redact-dark"), "redact-dark")
+        Self.expectCanvasDrew(try await Self.render(dark, appearance: .darkAqua, name: "redact-dark"), "redact-dark")
     }
 
-    @Test func backgroundStates() throws {
+    @Test func backgroundStates() async throws {
         let light = Self.make("image.background", image: W6.badge(900, 600))
         light.background.color = nil
         light.background.padding = 80
         light.renderPreviewNow()
-        Self.expectCanvasDrew(try Self.render(light, appearance: .aqua, name: "background-light"), "background-light")
+        Self.expectCanvasDrew(try await Self.render(light, appearance: .aqua, name: "background-light"), "background-light")
 
         let dark = Self.make("image.background", image: W6.badge(900, 600))
         dark.background.color = .yellow
         dark.background.padding = 60
         dark.renderPreviewNow()
-        Self.expectCanvasDrew(try Self.render(dark, appearance: .darkAqua, name: "background-dark"), "background-dark")
+        Self.expectCanvasDrew(try await Self.render(dark, appearance: .darkAqua, name: "background-dark"), "background-dark")
     }
 
     @Test func loadingAndFailedStates() async throws {
         let loading = ImageEditorModel(url: Self.sceneURL, tool: "image.crop")
-        _ = try Self.render(loading, appearance: .aqua, name: "loading-light")
+        _ = try await Self.render(loading, appearance: .aqua, name: "loading-light")
         let failed = ImageEditorModel(url: URL(fileURLWithPath: "/nonexistent/missing.png"), tool: "image.crop")
         await failed.load()
-        _ = try Self.render(failed, appearance: .darkAqua, name: "failed-dark")
+        _ = try await Self.render(failed, appearance: .darkAqua, name: "failed-dark")
         if case .failed = failed.loadState {} else { Issue.record("expected failed state") }
     }
 }

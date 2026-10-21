@@ -68,6 +68,10 @@ enum Archives {
             try? fm.removeItem(at: dest.appendingPathComponent("__MACOSX"))
         case "tar", "tar.gz", "rar":
             let tar = try context.tools.require("tar")
+            if format == "rar", !(await Probe.verifyTarReadsRAR(tar)) {
+                try Task.checkCancellation()
+                throw EngineError.unsupported("RAR archives: \(tar.path) can't read them on this Mac")
+            }
             let listing = try await ProcessRunner.run(tar, ["-tf", input.path], checkExit: false)
             guard listing.exitCode == 0 else {
                 throw EngineError.invalidInput("\(input.lastPathComponent) isn't a readable \(format.uppercased()) archive")

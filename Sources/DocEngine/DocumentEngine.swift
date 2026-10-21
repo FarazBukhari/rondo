@@ -58,7 +58,7 @@ public struct DocumentEngine: Engine {
         if hasDitto && locator.has("unzip") { extractable.append("zip") }
         if hasTar { extractable += ["tar", "tar.gz"] }
         if hasGzip { extractable.append("gz") }
-        if let tar = locator.url(for: "tar"), Probe.tarReadsRAR(tar) { extractable.append("rar") }
+        if let tar = locator.url(for: "tar"), Probe.tarAdvertisesRAR(tar) { extractable.append("rar") }
         out += extractable.map { ConversionDescriptor(from: $0, to: "folder") }
 
         // Slides

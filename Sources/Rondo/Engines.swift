@@ -30,11 +30,26 @@ func defaultOptions(for operation: RondoKit.Operation, inputs: [URL], registry: 
         if inputKinds.contains(.pdf), target?.kind == .image {
             options["dpi"] = .int(settings.pdfRenderDPI)
         }
+        if !inputKinds.isDisjoint(with: [.video, .audio]) {
+            options.merge(mediaOptions(settings)) { _, new in new }
+        }
     case .tool(let id):
         options = registry.tool(id)?.defaultOptions ?? [:]
         if inputKinds == [.image], options["quality"] == nil {
             options["quality"] = .double(settings.imageQuality)
         }
+        if !inputKinds.isDisjoint(with: [.video, .audio]) {
+            options.merge(mediaOptions(settings)) { existing, _ in existing }
+        }
     }
     return options
+}
+
+/// Encoder defaults from Settings → Quality (keys read by FFmpegEngine).
+private func mediaOptions(_ settings: Settings) -> [String: OptionValue] {
+    [
+        "crf": .int(settings.videoCRF),
+        "preset": .string(settings.videoPreset),
+        "audioBitrate": .int(settings.audioBitrateKbps),
+    ]
 }

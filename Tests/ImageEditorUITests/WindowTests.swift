@@ -5,12 +5,20 @@ import SwiftUI
 import Testing
 @testable import ImageEditorUI
 
+/// Polls `condition` on the main actor. Generous by default: in full-suite runs the main actor and the
+/// thread pools are shared with many heavy suites. Re-checks once after the deadline, because the work we
+/// wait for may have been queued behind this very wake-up.
 @MainActor
-func waitUntil(timeout: Double = 10, _ condition: () -> Bool) async throws {
+func waitUntil(_ what: String, timeout: Double = 180, _ condition: () -> Bool) async throws {
     let deadline = Date().addingTimeInterval(timeout)
     while !condition() {
-        guard Date() < deadline else { throw EngineError.failed("timed out") }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        if Date() >= deadline {
+            for _ in 0..<5 { await Task.yield() }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            if condition() { return }
+            throw EngineError.failed("timed out after \(Int(timeout)) s waiting for \(what)")
+        }
+        try await Task.sleep(nanoseconds: 25_000_000)
     }
 }
 
@@ -43,13 +51,15 @@ func waitUntil(timeout: Double = 10, _ condition: () -> Bool) async throws {
         #expect(ImageEditor.openURLs == [url.standardizedFileURL])
         #expect(model.panel == .adjust)
 
-        try await waitUntil { model.loadState == .ready }
+        try await waitUntil("image load") { model.loadState == .ready }
         #expect(model.sourceSize == CGSize(width: 64, height: 48))
         model.adjust.saturation = 0
         model.panel = .crop
         model.crop.rotateClockwise()
         #expect(model.canSave)
         model.save()   // saves the Crop panel only
+        try await waitUntil("submit") { !calls.isEmpty }
+        try await waitUntil("window close") { ImageEditor.openURLs.isEmpty }
         #expect(calls.count == 1)
         #expect(calls.first?.inputs == [url.standardizedFileURL])
         #expect(calls.first?.tool == "image.crop")
@@ -68,7 +78,7 @@ func waitUntil(timeout: Double = 10, _ condition: () -> Bool) async throws {
         // Escape key in the window.
         ImageEditor.open(url: url, tool: "image.redact", submit: submit)
         var model = try #require(ImageEditor.model(for: url))
-        try await waitUntil { model.loadState == .ready }
+        try await waitUntil("image load") { model.loadState == .ready }
         model.redact.regions = [CGRect(x: 1, y: 1, width: 10, height: 10)]
         let window = try #require(ImageEditor.window(for: url))
         let esc = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
@@ -86,7 +96,7 @@ func waitUntil(timeout: Double = 10, _ condition: () -> Bool) async throws {
         // Title-bar close mid-edit.
         ImageEditor.open(url: url, tool: "image.crop", submit: submit)
         model = try #require(ImageEditor.model(for: url))
-        try await waitUntil { model.loadState == .ready }
+        try await waitUntil("image load") { model.loadState == .ready }
         model.crop.rotateClockwise()
         try #require(ImageEditor.window(for: url)).close()
         #expect(model.finished && ImageEditor.openURLs.isEmpty)
@@ -106,7 +116,7 @@ func waitUntil(timeout: Double = 10, _ condition: () -> Bool) async throws {
         var calls = 0
         ImageEditor.open(url: url, tool: "image.crop") { _, _, _ in calls += 1 }
         let model = try #require(ImageEditor.model(for: url))
-        try await waitUntil { if case .failed = model.loadState { return true }; return false }
+        try await waitUntil("load failure") { if case .failed = model.loadState { return true }; return false }
         #expect(!model.canSave)
         model.save()
         model.cancel()

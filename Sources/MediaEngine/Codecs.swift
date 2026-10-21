@@ -1,10 +1,59 @@
 import Foundation
 import RondoKit
 
+// MARK: - User quality settings
+
+/// Quality settings the app passes from preferences. Absent keys → engine defaults.
+///
+/// Keys: `crf` (Int, x264 scale 0…51), `preset` (String, x264 preset name),
+/// `audioBitrate` (Int, kbps) for lossy audio encoders.
+struct Quality: Hashable, Sendable {
+    var crf: Int?
+    var preset: String?
+    /// Bits per second.
+    var audioBitrate: Int?
+
+    static let x264Presets: Set<String> = ["ultrafast", "superfast", "veryfast", "faster", "fast",
+                                           "medium", "slow", "slower", "veryslow", "placebo"]
+
+    init(crf: Int? = nil, preset: String? = nil, audioBitrate: Int? = nil) {
+        self.crf = crf.map { min(51, max(0, $0)) }
+        self.preset = preset.map { $0.lowercased() }.flatMap { Self.x264Presets.contains($0) ? $0 : nil }
+        self.audioBitrate = audioBitrate
+    }
+
+    init(_ job: JobSpec) {
+        self.init(
+            crf: job.options["crf"] == nil ? nil : job.int("crf", default: 23),
+            preset: job.string("preset"),
+            audioBitrate: job.options["audioBitrate"] == nil ? nil : min(512, max(8, job.int("audioBitrate", default: 192))) * 1000
+        )
+    }
+
+    var isEmpty: Bool { crf == nil && preset == nil && audioBitrate == nil }
+
+    /// Scales a bitrate chosen for CRF 23 the way x264 CRF behaves (+6 ≈ half the bits).
+    func scaled(_ bitrate: Int) -> Int {
+        guard let crf else { return bitrate }
+        return max(32_000, Int(Double(bitrate) * pow(2, Double(23 - crf) / 6)))
+    }
+
+    /// libvpx `-cpu-used` for an x264 preset name (medium → 4, the default).
+    var vpxCPUUsed: Int {
+        switch preset {
+        case "ultrafast", "superfast", "veryfast", "faster": 5
+        case "slow": 2
+        case "slower": 1
+        case "veryslow", "placebo": 0
+        default: 4
+        }
+    }
+}
+
 // MARK: - Video encoders
 
 enum VideoRate: Sendable, Hashable {
-    /// Sensible quality for a format conversion.
+    /// Sensible quality for a format conversion (honors `Quality.crf` when given).
     case auto
     /// Average bitrate in bits/s (compression).
     case bitrate(Int)
@@ -32,39 +81,43 @@ enum VideoEncoder: String, Sendable, Hashable, CaseIterable {
     var isHardware: Bool { self == .h264VT }
     var supportsTwoPass: Bool { !isHardware }
 
-    func args(rate: VideoRate, info: MediaInfo) -> [String] {
+    /// CRF maps: x264 as given; VP9 = crf + 9 (23 → 32); VP8 = crf − 13 (23 → 10);
+    /// MPEG-4 qscale = crf ÷ 7 (23 → 3); bitrate encoders (VideoToolbox, WMV2) scale their
+    /// estimate by 2^((23 − crf) / 6). `preset` drives x264 and libvpx `-cpu-used`.
+    func args(rate: VideoRate, info: MediaInfo, quality q: Quality = Quality()) -> [String] {
         let est = Self.estimateBitrate(info)
+        let preset = q.preset ?? "medium"
         var a = ["-c:v", rawValue]
         switch (self, rate) {
         case (.h264VT, .auto):
-            a += ["-b:v", "\(est)"]
+            a += ["-b:v", "\(q.scaled(est))"]
         case (.h264VT, .bitrate(let b)):
             a += ["-b:v", "\(b)"]
         case (.x264, .auto):
-            a += ["-preset", "medium", "-crf", "20"]
+            a += ["-preset", preset, "-crf", "\(q.crf ?? 20)"]
         case (.x264, .bitrate(let b)):
-            a += ["-preset", "medium", "-b:v", "\(b)", "-maxrate", "\(b * 3 / 2)", "-bufsize", "\(b * 2)"]
+            a += ["-preset", preset, "-b:v", "\(b)", "-maxrate", "\(b * 3 / 2)", "-bufsize", "\(b * 2)"]
         case (.vp9, .auto):
-            a += ["-crf", "32", "-b:v", "0"]
+            a += ["-crf", "\(q.crf.map { min(63, $0 + 9) } ?? 32)", "-b:v", "0"]
         case (.vp9, .bitrate(let b)):
             a += ["-b:v", "\(b)"]
         case (.vp8, .auto):
-            a += ["-crf", "10", "-b:v", "\(est * 6 / 5)"]
+            a += ["-crf", "\(q.crf.map { min(63, max(4, $0 - 13)) } ?? 10)", "-b:v", "\(q.scaled(est * 6 / 5))"]
         case (.vp8, .bitrate(let b)):
             a += ["-b:v", "\(b)"]
         case (.mpeg4, .auto):
-            a += ["-q:v", "3"]
+            a += ["-q:v", "\(q.crf.map { min(31, max(1, Int((Double($0) / 7).rounded()))) } ?? 3)"]
         case (.mpeg4, .bitrate(let b)):
             a += ["-b:v", "\(b)"]
         case (.wmv2, .auto):
-            a += ["-b:v", "\(est * 3 / 2)"]
+            a += ["-b:v", "\(q.scaled(est * 3 / 2))"]
         case (.wmv2, .bitrate(let b)):
             a += ["-b:v", "\(b)"]
         }
         switch self {
         case .h264VT: a += ["-allow_sw", "1"]
-        case .vp9: a += ["-deadline", "good", "-cpu-used", "4", "-row-mt", "1"]
-        case .vp8: a += ["-deadline", "good", "-cpu-used", "4"]
+        case .vp9: a += ["-deadline", "good", "-cpu-used", "\(q.vpxCPUUsed)", "-row-mt", "1"]
+        case .vp8: a += ["-deadline", "good", "-cpu-used", "\(q.vpxCPUUsed)"]
         case .mpeg4: a += ["-vtag", "xvid"]
         default: break
         }
@@ -345,14 +398,14 @@ extension VideoContainer {
 
     /// Codec arguments for a plan. `videoFilters`/`audioFilters` apply only to encoded streams.
     /// `complexGraph` → filters live in `-filter_complex` (caller adds the even-size scale there).
-    func codecArgs(_ plan: StreamPlan, info: MediaInfo, videoFilters: [String] = [], audioFilters: [String] = [], complexGraph: Bool = false) -> [String] {
+    func codecArgs(_ plan: StreamPlan, info: MediaInfo, quality: Quality = Quality(), videoFilters: [String] = [], audioFilters: [String] = [], complexGraph: Bool = false) -> [String] {
         var a: [String] = []
         switch plan.video {
         case .copy:
             a += ["-c:v", "copy"] + copyTagArgs(videoCodec: info.video?.codec ?? "")
         case .encode(let enc, let rate):
             if !complexGraph { a += ["-vf", (videoFilters + [evenScale]).joined(separator: ",")] }
-            a += enc.args(rate: rate, info: info)
+            a += enc.args(rate: rate, info: info, quality: quality)
         case .none:
             a += ["-vn"]
         }

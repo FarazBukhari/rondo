@@ -176,7 +176,7 @@ public struct FFmpegEngine: Engine {
 
     func runTool(_ tool: ToolID, job: JobSpec, ff: FFmpeg, ctx: JobContext, progress: ProgressSlice) async throws -> [URL] {
         if tool == ToolIDs.videoJoin {
-            return [try await videoJoin(job.inputs, ff: ff, ctx: ctx, progress: progress)]
+            return [try await videoJoin(job.inputs, job: job, ff: ff, ctx: ctx, progress: progress)]
         }
         return try await eachInput(job.inputs, progress: progress) { input, slice in
             switch tool {

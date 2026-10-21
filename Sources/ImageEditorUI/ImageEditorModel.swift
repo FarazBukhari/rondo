@@ -164,6 +164,9 @@ public final class ImageEditorModel: ObservableObject {
     private var drag: Drag?
     private var renderTask: Task<Void, Never>?
     private var renderDirty = false
+    /// Every preview job gets a sequence number; a result older than what's shown is dropped.
+    private var previewSeq = 0
+    private var appliedSeq: [EditorPanel: Int] = [:]
 
     public init(url: URL, tool: ToolID) {
         self.url = url
@@ -636,6 +639,7 @@ public final class ImageEditorModel: ObservableObject {
     }
 
     struct PreviewJob: @unchecked Sendable {
+        let seq: Int
         let panel: EditorPanel
         let proxy: ImageProxy
         let adjust: AdjustSettings
@@ -686,10 +690,13 @@ public final class ImageEditorModel: ObservableObject {
         default: needed = false
         }
         guard needed else { return nil }
-        return PreviewJob(panel: panel, proxy: proxy, adjust: adjust, redact: redact, background: background, subject: liftedSubject)
+        previewSeq += 1
+        return PreviewJob(seq: previewSeq, panel: panel, proxy: proxy, adjust: adjust, redact: redact, background: background, subject: liftedSubject)
     }
 
     private func apply(_ result: PreviewJob.Result, for job: PreviewJob) {
+        guard job.seq > appliedSeq[job.panel, default: 0] else { return }   // a newer render already landed
+        appliedSeq[job.panel] = job.seq
         switch job.panel {
         case .adjust:
             adjustPreview = result.image
@@ -713,7 +720,7 @@ public final class ImageEditorModel: ObservableObject {
         if renderTask != nil { renderDirty = true; return }
         guard let job = previewJob() else { return }
         renderTask = Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) { job.run() }.value
+            let result = await EditorWork.run { job.run() }
             guard let self else { return }
             self.renderTask = nil
             guard !Task.isCancelled, !self.finished else { return }

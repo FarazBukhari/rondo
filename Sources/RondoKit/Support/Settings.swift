@@ -13,6 +13,14 @@ public enum ModifierKey: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// When a modifier opens a wheel during a file drag.
+public enum WheelTrigger: String, Codable, Sendable, CaseIterable {
+    /// On key-down: fastest. Holding ⌥ to force a Finder copy also opens a wheel.
+    case press
+    /// On a quick press-and-release: holding a modifier (e.g. ⌥ for Finder copy) never opens a wheel.
+    case tap
+}
+
 public struct Hotkey: Codable, Equatable, Sendable {
     /// Carbon virtual key code (49 = Space).
     public var keyCode: UInt32
@@ -30,6 +38,7 @@ public struct Settings: Codable, Equatable, Sendable {
     public var convertModifier: ModifierKey = .shift
     public var toolsModifier: ModifierKey = .option
     public var actionsModifier: ModifierKey = .control
+    public var wheelTrigger: WheelTrigger = .press
 
     public var imageQuality: Double = 0.85        // 0...1 for JPEG/HEIC/WebP/AVIF
     public var videoCRF: Int = 23                 // x264-style CRF
@@ -71,7 +80,7 @@ public struct Settings: Codable, Equatable, Sendable {
     // MARK: Lenient decoding
 
     private enum CodingKeys: String, CodingKey {
-        case convertModifier, toolsModifier, actionsModifier
+        case convertModifier, toolsModifier, actionsModifier, wheelTrigger
         case imageQuality, videoCRF, videoPreset, audioBitrateKbps, pdfRenderDPI
         case destination, revealInFinder, hotkey, launchAtLogin, toolPaths
     }
@@ -85,6 +94,7 @@ public struct Settings: Codable, Equatable, Sendable {
         convertModifier = get(.convertModifier, convertModifier)
         toolsModifier = get(.toolsModifier, toolsModifier)
         actionsModifier = get(.actionsModifier, actionsModifier)
+        wheelTrigger = get(.wheelTrigger, wheelTrigger)
         imageQuality = get(.imageQuality, imageQuality)
         videoCRF = get(.videoCRF, videoCRF)
         videoPreset = get(.videoPreset, videoPreset)
@@ -104,6 +114,7 @@ public struct Settings: Codable, Equatable, Sendable {
         try c.encode(convertModifier, forKey: .convertModifier)
         try c.encode(toolsModifier, forKey: .toolsModifier)
         try c.encode(actionsModifier, forKey: .actionsModifier)
+        try c.encode(wheelTrigger, forKey: .wheelTrigger)
         try c.encode(imageQuality, forKey: .imageQuality)
         try c.encode(videoCRF, forKey: .videoCRF)
         try c.encode(videoPreset, forKey: .videoPreset)
