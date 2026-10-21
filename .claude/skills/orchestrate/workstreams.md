@@ -6,7 +6,7 @@ Paste **Shared preamble** + one workstream section into each subagent prompt.
 
 ## Shared preamble
 
-You are building one workstream of **Rondo**, a clean-room macOS menu-bar file converter (Swift 6.3, SwiftPM only, Command Line Tools only — no Xcode.app, no `xcodebuild`). Repo: `/Users/farazbukhari/Code/Personal_Projects/tangerine-clone`.
+You are building one workstream of **Rondo**, a clean-room macOS menu-bar file converter (Swift 6.3, SwiftPM only, Command Line Tools only — no Xcode.app, no `xcodebuild`). Repo: the repository root (current working directory).
 
 Read first: `CLAUDE.md`, `docs/ARCHITECTURE.md` (contracts — code against `RondoKit` exactly), and the `docs/SPEC.md` sections named in your brief.
 

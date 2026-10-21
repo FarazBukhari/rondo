@@ -32,6 +32,11 @@ Scripts are created by `/orchestrate` phase 1 — check they exist first.
 - `scripts/run.sh` — bundle + launch
 - `swift run rondo-cli convert <in> --to <fmt>` / `swift run rondo-cli tool <toolID> <in...> [--opt k=v]`
 - `scripts/make-fixtures.sh` then `scripts/smoke.sh` — conversion matrix pass/fail
+- `scripts/install.sh` — release build signed with `Rondo Dev` (if present) → /Applications
+- `UNIVERSAL=1 scripts/bundle.sh release` — arm64+x86_64 (needs full Xcode; used by CI)
+- `scripts/package.sh vX.Y.Z` — zip + sha256 + release notes into `dist/`
+- Release: bump `CFBundleShortVersionString` + `CHANGELOG.md`, push tag `vX.Y.Z` → `.github/workflows/release.yml` publishes the GitHub release
+- Public repo: github.com/FarazBukhari/rondo (MIT). README/release notes stay neutral — no Tangerine mentions there.
 
 ## Conventions
 

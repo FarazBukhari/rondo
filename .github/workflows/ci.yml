@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          XCODE="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          swift --version
+
+      - name: Install helpers (ffmpeg, ImageMagick)
+        run: brew install ffmpeg imagemagick
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: scripts/test.sh
+
+      - name: Universal release bundle
+        run: UNIVERSAL=1 scripts/bundle.sh release && lipo -archs build/Rondo.app/Contents/MacOS/Rondo

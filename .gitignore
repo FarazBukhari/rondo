@@ -4,3 +4,4 @@ fixtures/out/
 .DS_Store
 *.xcuserstate
 .swiftpm/
+dist/
