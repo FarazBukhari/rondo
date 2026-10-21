@@ -307,7 +307,7 @@ public struct RasterEngine: Engine {
         let scratch = try scratchDir(context)
         let loaded = try await load(input, job: job, context: context, scratch: scratch)
         progress(0.3)
-        let codes = ImageTools.readCodes(loaded.image)
+        let codes = await ImageTools.readCodes(loaded.image)
         guard !codes.isEmpty else { throw EngineError.failed("No QR code or barcode found in \(input.lastPathComponent)") }
         let out = scratch.appendingPathComponent("codes.txt")
         try (codes.joined(separator: "\n") + "\n").write(to: out, atomically: true, encoding: .utf8)
@@ -385,18 +385,18 @@ public struct RasterEngine: Engine {
         let color = ColorParser.parse(job.string("color")) ?? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
         let needsAlpha = mode == .remove || color.alpha < 1
         return try await edit(input, suffix: "background", job: job, context: context, progress: progress, needsAlpha: needsAlpha) { img, _ in
-            try ImageEdits.background(img, mode: mode, color: color, padding: job.clampedInt("padding", default: 0, 0...10_000))
+            try await ImageEdits.background(img, mode: mode, color: color, padding: job.clampedInt("padding", default: 0, 0...10_000))
         }
     }
 
     /// Load → transform → save in the input's format (PNG for SVG / alpha-needing results) with a suffix.
     private func edit(_ input: URL, suffix: String, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void,
-                      needsAlpha: Bool = false, _ transform: (CGImage, LoadedImage) throws -> CGImage) async throws -> URL {
+                      needsAlpha: Bool = false, _ transform: (CGImage, LoadedImage) async throws -> CGImage) async throws -> URL {
         let scratch = try scratchDir(context)
         let loaded = try await load(input, job: job, context: context, scratch: scratch)
         progress(0.3)
         try Task.checkCancellation()
-        let result = try transform(loaded.image, loaded)
+        let result = try await transform(loaded.image, loaded)
         progress(0.7)
         let format = editFormat(for: loaded, tools: context.tools, needsAlpha: needsAlpha)
         let out = scratch.appendingPathComponent("out.\(ImageFormats.ext(format))")

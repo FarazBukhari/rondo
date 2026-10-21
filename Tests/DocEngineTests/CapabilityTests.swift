@@ -72,7 +72,7 @@ import RondoKit
         #expect(counts.count == 1, "all callers see the same capability set")
         // Typically ~10 ms. Loose bound: the full suite saturates the machine with ffmpeg jobs,
         // and this guards against deadlock / pool starvation, not micro-latency.
-        #expect(elapsed < .seconds(10))
+        #expect(elapsed < .seconds(60))   // deadlock guard; 1-thread-pool runs take ~15 s
     }
 
     @Test func syncProcessTimesOut() {

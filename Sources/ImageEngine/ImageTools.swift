@@ -199,15 +199,16 @@ enum ImageTools {
     // MARK: QR / barcodes
 
     /// Payloads of every QR code / barcode found (Vision first, Core Image QR detector as fallback).
-    static func readCodes(_ image: CGImage) -> [String] {
+    /// Vision runs off the cooperative pool (it can wait on pool work internally; see `OffPool`).
+    static func readCodes(_ image: CGImage) async -> [String] {
         var found: [String] = []
-        let request = VNDetectBarcodesRequest()
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
         do {
-            try handler.perform([request])
-            for obs in request.results ?? [] {
-                if let s = obs.payloadStringValue, !found.contains(s) { found.append(s) }
+            let payloads: [String] = try await OffPool.run {
+                let request = VNDetectBarcodesRequest()
+                try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+                return (request.results ?? []).compactMap(\.payloadStringValue)
             }
+            for s in payloads where !found.contains(s) { found.append(s) }
         } catch {
             imageLog.notice("Vision barcode detection failed: \(error.localizedDescription, privacy: .public)")
         }

@@ -228,9 +228,9 @@ enum ImageEdits {
 
     /// fill: composite transparent areas onto `color`, with optional `padding` px on every side.
     /// replace / remove (macOS 14+): lift the subject with Vision, then put it on `color` or leave it transparent.
-    static func background(_ image: CGImage, mode: BackgroundMode, color: CGColor, padding: Int) throws -> CGImage {
+    static func background(_ image: CGImage, mode: BackgroundMode, color: CGColor, padding: Int) async throws -> CGImage {
         var subject = image
-        if mode != .fill { subject = try liftSubject(image) }
+        if mode != .fill { subject = try await liftSubject(image) }
         if mode == .remove && padding == 0 { return subject }
         let p = min(max(0, padding), 10_000)
         let W = subject.width + 2 * p, H = subject.height + 2 * p
@@ -243,7 +243,12 @@ enum ImageEdits {
         return try ImageOps.image(from: ctx)
     }
 
-    static func liftSubject(_ image: CGImage) throws -> CGImage {
+    /// Vision runs off the cooperative pool (it can wait on pool work internally; see `OffPool`).
+    static func liftSubject(_ image: CGImage) async throws -> CGImage {
+        try await OffPool.run { try liftSubjectBlocking(image) }
+    }
+
+    private static func liftSubjectBlocking(_ image: CGImage) throws -> CGImage {
         guard #available(macOS 14.0, *) else {
             throw EngineError.unsupported("Subject lifting needs macOS 14 or later")
         }

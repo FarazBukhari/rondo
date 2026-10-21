@@ -9,7 +9,7 @@ enum PDFExport {
     // MARK: Text
 
     /// Text per page. Pages without a text layer are OCR'd with Vision when `ocr` is true.
-    static func pageTexts(_ doc: PDFDocument, ocr: Bool, progress: (Double) -> Void) throws -> [String] {
+    static func pageTexts(_ doc: PDFDocument, ocr: Bool, progress: (Double) -> Void) async throws -> [String] {
         var out: [String] = []
         let n = doc.pageCount
         for i in 0..<n {
@@ -17,7 +17,7 @@ enum PDFExport {
             guard let page = doc.page(at: i) else { out.append(""); continue }
             var text = page.string ?? ""
             if ocr, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                text = (try? recognize(page)) ?? ""
+                text = (try? await recognize(page)) ?? ""
             }
             out.append(text.trimmingCharacters(in: .whitespacesAndNewlines))
             progress(Double(i + 1) / Double(n))
@@ -25,13 +25,17 @@ enum PDFExport {
         return out
     }
 
-    static func recognize(_ page: PDFPage) throws -> String {
+    /// OCR one page. Vision's text recognizer waits on cooperative-pool work internally, so it
+    /// must never run synchronously on a pool thread (deadlocks low-core machines): hop off-pool.
+    static func recognize(_ page: PDFPage) async throws -> String {
         let image = try PDFRender.render(page, dpi: 200, maxPixels: 4000)
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
-        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+        return try await OffPool.run {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+            return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+        }
     }
 
     static func plainText(_ pages: [String]) -> String {
@@ -91,7 +95,7 @@ enum PDFExport {
 
     /// Page-by-page attributed text written as Office Open XML; pages separated by page breaks.
     /// nil when the document has no text at all (even after OCR).
-    static func docx(_ doc: PDFDocument, ocr: Bool, progress: (Double) -> Void) throws -> Data? {
+    static func docx(_ doc: PDFDocument, ocr: Bool, progress: (Double) -> Void) async throws -> Data? {
         let result = NSMutableAttributedString()
         let n = doc.pageCount
         let bodyFont = NSFont.systemFont(ofSize: 12)
@@ -100,7 +104,7 @@ enum PDFExport {
             guard let page = doc.page(at: i) else { continue }
             var pageText: NSAttributedString = page.attributedString ?? NSAttributedString()
             if pageText.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, ocr,
-               let recognized = try? recognize(page), !recognized.isEmpty {
+               let recognized = try? await recognize(page), !recognized.isEmpty {
                 pageText = NSAttributedString(string: recognized, attributes: [.font: bodyFont])
             }
             if i > 0 { result.append(NSAttributedString(string: "\u{0C}", attributes: [.font: bodyFont])) }

@@ -57,10 +57,10 @@ public struct PDFDocumentEngine: Engine {
                 let from = FormatCatalog.format(for: input)?.id
                 switch (from, to) {
                 case ("pdf", "jpg"), ("pdf", "png"): return try pdfToImages(input, format: to, job: job, context: context, progress: p)
-                case ("pdf", "txt"): return try pdfToText(input, job: job, context: context, progress: p)
-                case ("pdf", "md"): return try pdfToMarkdown(input, job: job, context: context, progress: p)
-                case ("pdf", "docx"): return try pdfToDocx(input, job: job, context: context, progress: p)
-                case ("pdf", "epub"): return try pdfToEpub(input, job: job, context: context, progress: p)
+                case ("pdf", "txt"): return try await pdfToText(input, job: job, context: context, progress: p)
+                case ("pdf", "md"): return try await pdfToMarkdown(input, job: job, context: context, progress: p)
+                case ("pdf", "docx"): return try await pdfToDocx(input, job: job, context: context, progress: p)
+                case ("pdf", "epub"): return try await pdfToEpub(input, job: job, context: context, progress: p)
                 case ("txt", "pdf"), ("txt", "jpg"), ("txt", "png"): return try textTo(input, format: to, job: job, context: context, progress: p)
                 default: throw EngineError.unsupported("\(from ?? "?") → \(to)")
                 }
@@ -71,7 +71,7 @@ public struct PDFDocumentEngine: Engine {
             case "pdf.merge": return try [merge(job, context: context)]
             case "pdf.split": return try await eachInput(job, context) { try split($0, job: job, context: context, progress: $1) }
             case "pdf.reorder": return try await eachInput(job, context) { try reorder($0, job: job, context: context, progress: $1) }
-            case "pdf.text.extract": return try await eachInput(job, context) { try pdfToText($0, job: job, context: context, progress: $1) }
+            case "pdf.text.extract": return try await eachInput(job, context) { try await pdfToText($0, job: job, context: context, progress: $1) }
             case "pdf.metadata.strip": return try await eachInput(job, context) { try stripMetadata($0, job: job, context: context, progress: $1) }
             default: throw EngineError.unsupported(tool.rawValue)
             }
@@ -130,39 +130,39 @@ public struct PDFDocumentEngine: Engine {
         return try commitPages(files, folder: folder, for: input, ext: format, context: context)
     }
 
-    private func pdfToText(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
+    private func pdfToText(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) async throws -> URL {
         let doc = try PDFSupport.open(input)
         let ocr = job.bool("ocr", default: true)
-        let pages = try PDFExport.pageTexts(doc, ocr: ocr) { progress($0 * 0.9) }
+        let pages = try await PDFExport.pageTexts(doc, ocr: ocr) { progress($0 * 0.9) }
         try requireText(pages, input: input, ocr: ocr)
         let out = try PDFSupport.scratchDir(context).appendingPathComponent("text.txt")
         try PDFExport.plainText(pages).write(to: out, atomically: true, encoding: .utf8)
         return try commit(out, for: input, ext: "txt", context: context)
     }
 
-    private func pdfToMarkdown(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
+    private func pdfToMarkdown(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) async throws -> URL {
         let doc = try PDFSupport.open(input)
         let ocr = job.bool("ocr", default: true)
-        let pages = try PDFExport.pageTexts(doc, ocr: ocr) { progress($0 * 0.9) }
+        let pages = try await PDFExport.pageTexts(doc, ocr: ocr) { progress($0 * 0.9) }
         try requireText(pages, input: input, ocr: ocr)
         let out = try PDFSupport.scratchDir(context).appendingPathComponent("text.md")
         try PDFExport.markdown(pages, title: title(of: doc, input: input)).write(to: out, atomically: true, encoding: .utf8)
         return try commit(out, for: input, ext: "md", context: context)
     }
 
-    private func pdfToDocx(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
+    private func pdfToDocx(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) async throws -> URL {
         let doc = try PDFSupport.open(input)
         let ocr = job.bool("ocr", default: true)
-        guard let data = try PDFExport.docx(doc, ocr: ocr, progress: progress) else { throw noText(input, ocr: ocr) }
+        guard let data = try await PDFExport.docx(doc, ocr: ocr, progress: progress) else { throw noText(input, ocr: ocr) }
         let out = try PDFSupport.scratchDir(context).appendingPathComponent("doc.docx")
         try data.write(to: out)
         return try commit(out, for: input, ext: "docx", context: context)
     }
 
-    private func pdfToEpub(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
+    private func pdfToEpub(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) async throws -> URL {
         let doc = try PDFSupport.open(input)
         let ocr = job.bool("ocr", default: true)
-        let pages = try PDFExport.pageTexts(doc, ocr: ocr) { progress($0 * 0.8) }
+        let pages = try await PDFExport.pageTexts(doc, ocr: ocr) { progress($0 * 0.8) }
         try requireText(pages, input: input, ocr: ocr)
         let author = doc.documentAttributes?[PDFDocumentAttribute.authorAttribute] as? String
         let lang = Locale.preferredLanguages.first.map { String($0.prefix(while: { $0 != "-" && $0 != "_" })) } ?? "en"

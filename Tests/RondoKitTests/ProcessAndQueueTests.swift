@@ -57,7 +57,7 @@ import Testing
         let result = await task.result
         // Child sleeps 30 s; returning well before that proves it was killed. Loose bound: the full
         // suite runs ffmpeg-heavy tests in parallel and can delay scheduling by seconds.
-        #expect(Date().timeIntervalSince(start) < 10)
+        #expect(Date().timeIntervalSince(start) < 25)   // < the 30 s sleep; passes even on a 1-thread pool
         guard case .failure(let error) = result else {
             Issue.record("expected cancellation")
             return
@@ -195,5 +195,31 @@ final class LineCollector: @unchecked Sendable {
         TempDir.remove(outside)
         #expect(FileManager.default.fileExists(atPath: outside.path))
         try FileManager.default.removeItem(at: outside)
+    }
+}
+
+@Suite struct OffPoolTests {
+    @Test func runsOffTheCooperativePoolAndReturns() async throws {
+        let onMain = try await OffPool.run { Thread.isMainThread }
+        #expect(!onMain)
+        let label = try await OffPool.run { String(cString: __dispatch_queue_get_label(nil)) }
+        #expect(label == "com.farazbukhari.rondo.offpool")
+    }
+
+    @Test func propagatesErrors() async {
+        await #expect(throws: EngineError.self) {
+            try await OffPool.run { throw EngineError.failed("boom") }
+        }
+    }
+
+    @Test func manyBlockingCallsDoNotStarveThePool() async throws {
+        // 64 concurrent 50 ms blocking calls: if they ran on the cooperative pool they'd serialize
+        // on its few threads; off-pool they overlap and the awaiting tasks stay suspended.
+        let start = Date()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<64 { group.addTask { try await OffPool.run { Thread.sleep(forTimeInterval: 0.05) } } }
+            try await group.waitForAll()
+        }
+        #expect(Date().timeIntervalSince(start) < 30)
     }
 }
