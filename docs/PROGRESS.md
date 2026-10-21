@@ -12,7 +12,7 @@ Updated by `/orchestrate`. A box is checked only after the orchestrator ran the 
 - [x] **P4 Integration** — registry wiring, app composition, rondo-cli, fixtures, smoke matrix
 - [x] **P5 Tool windows** — W6 Image editor · W7 Media editor · W8 PDF organizer
   - [x] W6  - [x] W7  - [x] W8
-- [ ] **P6 Polish** — settings complete, original icon, release build, launch at login, permission onboarding
+- [x] **P6 Polish** — settings complete, original icon, release build, launch at login, permission onboarding
 - [ ] **P7 Verify** — clean release build, tests, smoke, review pass, clean-room audit
 
 ## Toolchain (P0 fills)
@@ -45,3 +45,38 @@ Full run 2026-10-21 (P4 gate), `scripts/smoke.sh`, 4 engines, 403 conversions + 
 
 P5 re-run 2026-10-21 (editors wired): 616/616, expected errors 5/5. Tests 386/386 (73 suites).
 
+## Manual QA (human only — never auto-checked)
+
+- [x] Finder drag + Shift → Convert wheel at cursor; drop on slice converts — user-confirmed 2026-10-21
+- [x] Finder drag + Option → Tools wheel; Control → Actions wheel — user-confirmed 2026-10-21
+- [ ] Wheel stays open after key release; Esc / drop-outside cancels
+- [ ] Arrow keys + Enter during drag (Accessibility granted)
+- [x] Batch drag (5 mixed images) → only shared formats shown; HUD shows 5 jobs; Finder reveals outputs — user-confirmed 2026-10-21
+- [x] Status-item drop, hotkey on Finder selection, Float shelf drag-out — user-confirmed 2026-10-21
+- [ ] AirDrop / Copy / Move / Copy Path / Terminal actions (Copy Path / Float / Terminal user-confirmed; AirDrop / Copy / Move untested)
+- [x] Editor windows: image crop/annotate/redact/adjust, video trim, audio trim/bleep, PDF reorder — user-confirmed 2026-10-21
+- [x] Settings persist across relaunch (wheelTrigger=tap, videoPreset=fast verified via `defaults export` after user quit/relaunch, 2026-10-21); first-run welcome shown once; quick-tap mode user-confirmed
+- [ ] Launch at login actually starts Rondo after a real logout/login (saved `launchAtLogin=true` as of 2026-10-21; registered via SMAppService from Settings)
+
+## Decisions log
+
+| Date | Decision | Why |
+|------|----------|-----|
+| 2026-10-20 | Clean-room from public sources; REA not used on Tangerine | No Intel binary obtainable; EULA bars reverse engineering; REA scope = owned/authorized software |
+| 2026-10-20 | Default keys Shift/Option/Control | Public sources conflict; all remappable |
+| 2026-10-21 | Global drag detection = NSEvent global mouse monitors + drag pasteboard + polled `NSEvent.modifierFlags`; no Accessibility needed | P1 spike: user confirmed wheel + drop in Finder; logs show `drag began` → `modifier tap` → `drop on slice` |
+| 2026-10-21 | Tests via `scripts/test.sh` (Swift Testing + CLT framework flags); package uses Swift 5 language mode | No XCTest in CLT; strict-concurrency friction with AppKit monitors |
+| 2026-10-21 | W1 default trigger policy `.press` (opens on key-down) | Fastest; risk: ⌥ to force Finder copy opens Tools wheel. Revisit in P6 (`.standardTap` = open on quick release) |
+| 2026-10-21 | DocumentEngine also archives PDFs (pdf → zip/tar.gz/gz) | PDF engine never advertises archive targets; otherwise PDFs were the only unarchivable files |
+| 2026-10-21 | Archive targets (ZIP/TAR.GZ/GZIP) shown on every file's Convert wheel, sorted last (overflow ring) | Mirrors Finder "Compress"; revisit clutter in P6 |
+| 2026-10-21 | `ToolDescriptor.rejectsFormats` + `OptionSpec.Control.rect/list/json` added to contracts | Smoke showed SVG tools advertised but unsupported; editors need typed option specs |
+| 2026-10-21 | Editors open one window per file (max 5) for image/media UI tools; PDF organizer takes all files | Editors are single-input by design |
+| 2026-10-21 | Engine probes (ffmpeg encoders, RAR) run synchronously on the caller thread with GCD timeouts, cached once | Blocking-on-pool probes caused full-suite flakes (P5/P6) |
+| 2026-10-21 | Timing assertions in tests are deadlock guards with loose bounds (≤10 s); UI loads use staged waits up to 180 s | Full suite saturates this 4-core Intel Mac with parallel ffmpeg |
+| 2026-10-21 | New setting `wheelTrigger` (press / quick tap), default press | Resolves ⌥-copy conflict by user choice; user confirmed tap mode |
+| 2026-10-21 | Media engine honors `crf` / `preset` / `audioBitrate` from Settings → Quality | P4 gap; app passes them on every video/audio job |
+| 2026-10-21 | PROGRESS.md truncated by a P5 sed range-delete; restored from 1d5d44c in P6 | Use Python edits with asserts, never open-ended sed ranges |
+
+## Blockers
+
+(none)
