@@ -273,8 +273,8 @@ private let threePages = ["Alpha page one. The quick brown fox.", "Bravo page tw
 
     @Test func zipWriterRoundTrip() async throws {
         var z = ZipWriter()
-        z.add("a.txt", Data(String(repeating: "hello ", count: 200).utf8))
-        z.add("dir/b.bin", Data((0..<255).map { UInt8($0) }), compress: false)
+        try z.add("a.txt", Data(String(repeating: "hello ", count: 200).utf8))
+        try z.add("dir/b.bin", Data((0..<255).map { UInt8($0) }), compress: false)
         let dir = try PFx.dir("zip")
         defer { PFx.cleanup(dir) }
         let url = dir.appendingPathComponent("t.zip")
@@ -317,5 +317,140 @@ private let threePages = ["Alpha page one. The quick brown fox.", "Bravo page tw
         // Image outputs still work for the same file.
         let png = try await e.runTest(JobSpec(inputs: [src], operation: .convert(to: "png"), options: ["dpi": .int(72)]))
         #expect(png[0].lastPathComponent == "images (pages)")
+    }
+}
+
+@Suite struct PDFReviewFixTests {
+    @Test func renderCapsTotalPixels() throws {
+        let dir = try PFx.dir("cap")
+        defer { PFx.cleanup(dir) }
+        let src = dir.appendingPathComponent("p.pdf")
+        PFx.makePDF(["x"], at: src)
+        let page = try #require(PDFDocument(url: src)?.page(at: 0))
+        let img = try PDFRender.render(page, dpi: 300, maxArea: 100_000)
+        #expect(img.width * img.height <= 100_000)
+        #expect(abs(Double(img.width) / Double(img.height) - 200.0 / 260.0) < 0.02)
+        #expect(PDFRender.maxArea == 50_000_000)
+        let nan = try PDFRender.render(page, dpi: .nan)
+        #expect(nan.width > 0)
+    }
+
+    /// Mirrors W8's `PageArrangement.options` encodings, with a deletion present in each.
+    @Test func reorderMatchesOrganizerEncodings() async throws {
+        let dir = try PFx.dir("w8")
+        defer { PFx.cleanup(dir) }
+        let src = dir.appendingPathComponent("a.pdf")
+        PFx.makePDF(threePages, at: src)
+        let e = PDFDocumentEngine()
+        func pages(_ opts: [String: OptionValue]) async throws -> [(String, Int)] {
+            let out = try await e.runTest(JobSpec(inputs: [src], operation: .tool("pdf.reorder"), options: opts))
+            let d = try #require(PDFDocument(url: out[0]))
+            return (0..<d.pageCount).map { (String(d.page(at: $0)?.string?.prefix(5) ?? ""), d.page(at: $0)?.rotation ?? -1) }
+        }
+        // A: kept pages ascending → `deletions` + `rotations` parallel to source pages 1…N.
+        let a = try await pages(["deletions": .list([2]), "rotations": .list([0, 0, 90])])
+        #expect(a.map(\.0) == ["Alpha", "Charl"] && a.map(\.1) == [0, 90], "\(a)")
+        // A: a rotation recorded for a deleted page is ignored.
+        let a2 = try await pages(["deletions": .list([2]), "rotations": .list([0, 180, 0])])
+        #expect(a2.map(\.1) == [0, 0])
+        // B: reordered → `order` (deleted pages absent) + `rotations` parallel to `order`.
+        let b = try await pages(["order": .list([3, 1]), "rotations": .list([90, 270])])
+        #expect(b.map(\.0) == ["Charl", "Alpha"] && b.map(\.1) == [90, 270], "\(b)")
+        // Hostile values don't trap.
+        let c = try await pages(["order": .list([.nan, 1, 1e300]), "rotations": .list([.infinity]), "deletions": .list([-.infinity])])
+        #expect(c.map(\.0) == ["Alpha"] && c.map(\.1) == [0])
+    }
+
+    @Test func splitGuardsAndDuplicateRanges() async throws {
+        let dir = try PFx.dir("split-guard")
+        defer { PFx.cleanup(dir) }
+        let src = dir.appendingPathComponent("a.pdf")
+        PFx.makePDF(threePages, at: src)
+        let e = PDFDocumentEngine()
+        let open = try await e.runTest(JobSpec(inputs: [src], operation: .tool("pdf.split"), options: ["ranges": .ranges([2...Double.infinity])]))
+        #expect(open[0].lastPathComponent == "a pages 2-3.pdf")
+        let huge = try await e.runTest(JobSpec(inputs: [src], operation: .tool("pdf.split"), options: ["every": .double(1e30)]))
+        #expect(huge[0].lastPathComponent == "a pages 1-3.pdf")
+        await #expect(throws: EngineError.self) {
+            _ = try await e.runTest(JobSpec(inputs: [src], operation: .tool("pdf.split"), options: ["ranges": .ranges([5...9])]))
+        }
+        let dup = try await e.runTest(JobSpec(inputs: [src], operation: .tool("pdf.split"), options: ["ranges": .ranges([1...2, 1...2])]))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dup[0].path).sorted() == ["Pages 1-2 2.pdf", "Pages 1-2.pdf"])
+        #expect(PDFTools.splitRanges([-Double.infinity...(-1)], every: 1, pageCount: 3).isEmpty)
+        #expect(PDFTools.splitRanges([], every: Int.max, pageCount: 3) == [1...3])
+    }
+
+    @Test func compressTargetUnreachableFailsAndCommitsNothing() async throws {
+        let dir = try PFx.dir("strict")
+        defer { PFx.cleanup(dir) }
+        let src = dir.appendingPathComponent("photo.pdf")
+        PFx.makePDF(["Heavy page with photo"], at: src, image: PFx.noisy())
+        do {
+            _ = try await PDFDocumentEngine().runTest(JobSpec(inputs: [src], operation: .tool("pdf.compress"), options: ["targetBytes": .int(100)]))
+            Issue.record("unreachable target should fail")
+        } catch let EngineError.failed(msg) {
+            #expect(msg.hasPrefix("Couldn't get photo.pdf under 100 bytes; smallest achievable ≈ "), "\(msg)")
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["photo.pdf"])
+    }
+
+    @Test func metadataStripRemovesXMPAndKeepsOutline() async throws {
+        let dir = try PFx.dir("xmp")
+        defer { PFx.cleanup(dir) }
+        let raw = dir.appendingPathComponent("raw.pdf")
+        var media = CGRect(x: 0, y: 0, width: 200, height: 200)
+        let ctx = CGContext(raw as CFURL, mediaBox: &media, [kCGPDFContextAuthor as String: "Jane Roe"] as CFDictionary)!
+        ctx.addDocumentMetadata(Data("""
+        <?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator><rdf:Seq><rdf:li>XMPSECRETAUTHOR</rdf:li></rdf:Seq></dc:creator></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>
+        """.utf8) as CFData)
+        for _ in 0..<2 { ctx.beginPDFPage(nil); ctx.endPDFPage() }
+        ctx.closePDF()
+        #expect(Self.catalogXMP(raw)?.contains("XMPSECRETAUTHOR") == true)
+        // A plain PDFKit rewrite (the old strip) keeps the catalog XMP — that's the bug being guarded.
+        let rewritten = dir.appendingPathComponent("rewritten.pdf")
+        let d0 = try #require(PDFDocument(url: raw))
+        d0.documentAttributes = [:]
+        #expect(d0.write(to: rewritten))
+        #expect(Self.catalogXMP(rewritten)?.contains("XMPSECRETAUTHOR") == true)
+
+        let out = try await PDFDocumentEngine().runTest(JobSpec(inputs: [raw], operation: .tool("pdf.metadata.strip")))
+        #expect(Self.catalogXMP(out[0]) == nil)
+        let stripped = try #require(PDFDocument(url: out[0]))
+        #expect(stripped.pageCount == 2)
+        #expect((stripped.documentAttributes?[PDFDocumentAttribute.authorAttribute] as? String ?? "").isEmpty)
+
+        // Bookmarks survive the rebuild and still point at the right page.
+        let doc = try #require(PDFDocument(url: raw))
+        let root = PDFOutline(), mark = PDFOutline()
+        mark.label = "Chapter Two"
+        mark.destination = PDFDestination(page: doc.page(at: 1)!, at: .zero)
+        root.insertChild(mark, at: 0)
+        doc.outlineRoot = root
+        let marked = dir.appendingPathComponent("marked.pdf")
+        #expect(doc.write(to: marked))
+        let out2 = try await PDFDocumentEngine().runTest(JobSpec(inputs: [marked], operation: .tool("pdf.metadata.strip")))
+        let s2 = try #require(PDFDocument(url: out2[0]))
+        let child = s2.outlineRoot?.child(at: 0)
+        #expect(child?.label == "Chapter Two")
+        #expect(child?.destination?.page.map { s2.index(for: $0) } == 1)
+    }
+
+    static func catalogXMP(_ url: URL) -> String? {
+        // Keep the document alive while using its catalog (the dictionary is owned by it).
+        guard let doc = CGPDFDocument(url as CFURL) else { return nil }
+        return withExtendedLifetime(doc) {
+            guard let cat = doc.catalog else { return nil }
+            var stream: CGPDFStreamRef?
+            guard CGPDFDictionaryGetStream(cat, "Metadata", &stream), let stream else { return nil }
+            var fmt = CGPDFDataFormat.raw
+            return (CGPDFStreamCopyData(stream, &fmt) as Data?).map { String(decoding: $0, as: UTF8.self) }
+        }
+    }
+
+    @Test func zipWriterRefusesTooManyEntries() throws {
+        var z = ZipWriter()
+        for i in 0..<ZipWriter.maxEntries { try z.add("f\(i)", Data(), compress: false) }
+        #expect(throws: EngineError.self) { try z.add("one-too-many", Data()) }
+        #expect(z.finish().count > 0)
     }
 }

@@ -7,6 +7,8 @@ import SwiftUI
 @MainActor
 public enum MediaEditor {
     private static var controllers: [URL: MediaEditorWindowController] = [:]
+    /// Closed editors whose preview processes / scratch dirs are still being cleaned up.
+    private static var closing: [ObjectIdentifier: MediaEditorModel] = [:]
     /// Tests turn this off so windows are built but never put on screen.
     static var presentsWindows = true
 
@@ -41,16 +43,56 @@ public enum MediaEditor {
         let model = MediaEditorModel(url: url, panel: panel, isVideo: isVideo, tools: tools)
         model.submitHandler = submit
         let controller = MediaEditorWindowController(model: model)
-        controller.onClose = { controllers[key] = nil }
+        controller.onClose = {
+            controllers[key] = nil
+            trackCleanup(of: model)
+        }
         controllers[key] = controller
         if presentsWindows { controller.show() }
         model.start()
     }
 
-    /// Closes every editor without submitting (e.g. on quit).
+    /// Closes every editor without submitting (e.g. on quit). Cleanup continues in the background.
     public static func closeAll() {
         for c in Array(controllers.values) { c.close() }
     }
+
+    /// Closes every editor without submitting, then waits until each one's preview processes have
+    /// exited and its scratch dir is removed — including editors closed earlier whose cleanup is still
+    /// running. After `timeout` seconds it deletes any remaining scratch dirs itself and returns.
+    /// For `applicationShouldTerminate` (`.terminateLater`).
+    public static func closeAllAndWait(timeout: TimeInterval = 5) async {
+        closeAll()
+        let models = Array(closing.values)
+        guard !models.isEmpty else { return }
+        let finished = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let once = ResumeOnce(cont)
+            Task { @MainActor in
+                for m in models { await m.waitForCleanup() }
+                once.resume(true)
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                once.resume(false)
+            }
+        }
+        if !finished {
+            editorLog.error("editor cleanup timed out after \(timeout)s; removing scratch dirs directly")
+            for m in models { m.removeWorkDirNow() }
+        }
+    }
+
+    private static func trackCleanup(of model: MediaEditorModel) {
+        let id = ObjectIdentifier(model)
+        closing[id] = model
+        Task { @MainActor in
+            await model.waitForCleanup()
+            closing[id] = nil
+        }
+    }
+
+    /// Editors closed but not yet fully cleaned up (tests).
+    static var cleanupsInFlight: Int { closing.count }
 
     static var openControllers: [MediaEditorWindowController] { Array(controllers.values) }
 
@@ -122,6 +164,22 @@ final class MediaEditorWindowController: NSObject, NSWindowDelegate {
         let done = onClose
         onClose = nil
         done?()
+    }
+}
+
+/// Resumes a continuation exactly once (first of several racing tasks wins).
+private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<T, Never>?
+
+    init(_ cont: CheckedContinuation<T, Never>) { self.cont = cont }
+
+    func resume(_ value: T) {
+        let c: CheckedContinuation<T, Never>? = lock.withLock {
+            defer { cont = nil }
+            return cont
+        }
+        c?.resume(returning: value)
     }
 }
 

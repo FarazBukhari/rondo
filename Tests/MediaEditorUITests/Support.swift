@@ -60,6 +60,11 @@ actor W7Fixtures {
                                                  "-i", dir.appendingPathComponent("clip.mp4").path, "-c", "copy", tmp.path])
             try FileManager.default.moveItem(at: tmp, to: rotated)
         }
+        // Second name for the heavy clip (hard link: no extra disk) so two editors can build proxies at once.
+        let longB = dir.appendingPathComponent("long-b.mkv")
+        if !FileManager.default.fileExists(atPath: longB.path) {
+            try FileManager.default.linkItem(at: dir.appendingPathComponent("long.mkv"), to: longB)
+        }
         return dir
     }
 

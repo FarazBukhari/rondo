@@ -66,6 +66,24 @@ private func touch(_ url: URL) {
         #expect(url.deletingLastPathComponent().standardizedFileURL == out.standardizedFileURL)
     }
 
+    @Test func danglingSymlinkCountsAsTaken() throws {
+        let dir = try makeDir()
+        let input = dir.appendingPathComponent("a.png")
+        touch(input)
+        try FileManager.default.createSymbolicLink(atPath: dir.appendingPathComponent("a.jpg").path, withDestinationPath: "/nonexistent/target")
+        #expect(namer.url(for: input, ext: "jpg").lastPathComponent == "a 2.jpg")
+    }
+
+    @Test func dottedFolderCollision() throws {
+        let dir = try makeDir()
+        let input = dir.appendingPathComponent("my.report.pdf")
+        touch(input)
+        let first = namer.folder(for: input, suffix: "pages")
+        #expect(first.lastPathComponent == "my.report (pages)")
+        try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+        #expect(namer.folder(for: input, suffix: "pages").lastPathComponent == "my.report (pages) 2")
+    }
+
     @Test func commitResolvesLateCollision() throws {
         let dir = try makeDir()
         let input = dir.appendingPathComponent("a.png")

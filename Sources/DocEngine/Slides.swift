@@ -37,13 +37,19 @@ enum Slides {
             throw EngineError.missingTool("LibreOffice (soffice) or Keynote")
         }
         let work = try DocSupport.scratchDir(context)
+        // Exporters get a clone (APFS copy-on-write) so LibreOffice's `.~lock.<name>#` never lands beside the original.
+        let staged = work.appendingPathComponent("input", isDirectory: true)
+        try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
+        let copy = staged.appendingPathComponent(input.lastPathComponent)
+        try FileManager.default.copyItem(at: input, to: copy)
         progress(0.05)
-        let pdf = try await exportPDF(input, exporter: exporter, work: work)
+        let pdf = try await exportPDF(copy, exporter: exporter, work: work)
         progress(0.6)
         if to == "pdf" { return try DocSupport.commit(pdf, for: input, ext: "pdf", context: context) }
 
         let folder = work.appendingPathComponent("slides", isDirectory: true)
-        let files = try PDFWriter.rasterize(pdf, format: to, dpi: Double(job.int("dpi", default: 150)),
+        let dpi = min(max(job.int("dpi", default: 150), 36), 600)
+        let files = try PDFWriter.rasterize(pdf, format: to, dpi: Double(dpi),
                                             quality: job.double("quality", default: 0.9), into: folder) { progress(0.6 + $0 * 0.38) }
         if files.count == 1 { return try DocSupport.commit(files[0], for: input, ext: to, context: context) }
         return try context.namer.commit(folder, to: context.namer.folder(for: input, suffix: "slides", destination: context.destination))

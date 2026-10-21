@@ -93,6 +93,13 @@ enum DocSupport {
         context.outputURL(for: input, ext: "x").deletingLastPathComponent()
     }
 
+    /// Free bytes on the volume holding `url` (fresh value, no URL resource cache).
+    static func freeBytes(at url: URL) -> Int64? {
+        let fresh = URL(fileURLWithPath: url.path)
+        guard let v = try? fresh.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity else { return nil }
+        return Int64(v)
+    }
+
     /// Environment for archive tools: no AppleDouble `._` files in tarballs.
     static var archiveEnvironment: [String: String] {
         var env = ProcessInfo.processInfo.environment
@@ -107,21 +114,41 @@ enum DocSupport {
 /// it runs Foundation `Process` on the calling thread with a hard kill timeout, cached once per key
 /// behind a lock so concurrent first callers wait for one probe instead of spawning their own.
 enum Probe {
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var cache: [String: Bool] = [:]
+    /// One cell per key; the global lock only guards the dictionary, never a running probe.
+    private final class Cell: @unchecked Sendable {
+        let lock = NSLock()
+        var value: Bool?
+    }
 
-    /// Computes `key` once (the lock is held while computing). `nil` from `compute` (e.g. a timeout) is not cached.
+    private static let registryLock = NSLock()
+    nonisolated(unsafe) private static var cells: [String: Cell] = [:]
+
+    private static func cell(_ key: String) -> Cell {
+        registryLock.withLock {
+            if let c = cells[key] { return c }
+            let c = Cell()
+            cells[key] = c
+            return c
+        }
+    }
+
+    /// Computes `key` once; concurrent first callers of the same key wait on that key's lock only.
+    /// `nil` from `compute` (e.g. a timeout) is not cached.
     static func once(_ key: String, _ compute: () -> Bool?) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if let hit = cache[key] { return hit }
+        let c = cell(key)
+        c.lock.lock()
+        defer { c.lock.unlock() }
+        if let v = c.value { return v }
         guard let v = compute() else { return false }
-        cache[key] = v
+        c.value = v
         return v
     }
 
-    static func cached(_ key: String) -> Bool? { lock.withLock { cache[key] } }
-    static func store(_ key: String, _ value: Bool) { lock.withLock { cache[key] = value } }
+    /// Async-side cache (short critical sections only; never held across a subprocess).
+    private static let asyncLock = NSLock()
+    nonisolated(unsafe) private static var asyncCache: [String: Bool] = [:]
+    static func cached(_ key: String) -> Bool? { asyncLock.withLock { asyncCache[key] } }
+    static func store(_ key: String, _ value: Bool) { asyncLock.withLock { asyncCache[key] = value } }
 
     /// Cheap advertising check: `tar` is bsdtar on libarchive ≥ 3 (RAR reader built in since 3.0).
     /// One `tar --version` spawn, ~10 ms, cached.

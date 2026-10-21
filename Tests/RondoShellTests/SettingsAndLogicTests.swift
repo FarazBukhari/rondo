@@ -54,8 +54,7 @@ import Testing
         var s = RondoKit.Settings()
         s.hotkey = nil
         let decoded = try JSONDecoder().decode(RondoKit.Settings.self, from: JSONEncoder().encode(s))
-        // Synthesized encode omits a nil hotkey, so decoding restores the ⌃⌥Space default.
-        // Contract request filed with the orchestrator (encode hotkey as explicit null).
+        // RondoKit encodes a cleared hotkey as explicit null so the ⌃⌥Space default doesn't return.
         #expect(decoded.hotkey == nil)
     }
 
@@ -123,14 +122,42 @@ import Testing
     }
 }
 
-@Suite struct FinderSelectionParsingTests {
-    @Test func aliasListToURLs() {
-        let list = NSAppleEventDescriptor.list()
-        list.insert(NSAppleEventDescriptor(fileURL: URL(fileURLWithPath: "/tmp/one.txt")), at: 1)
-        list.insert(NSAppleEventDescriptor(fileURL: URL(fileURLWithPath: "/tmp/two folder", isDirectory: true)), at: 2)
-        let urls = FinderSelection.fileURLs(in: list).map(\.path)
-        #expect(urls == ["/tmp/one.txt", "/tmp/two folder"])
-        #expect(FinderSelection.fileURLs(in: NSAppleEventDescriptor.list()).isEmpty)
+@Suite struct FinderSelectionTests {
+    @Test func parsesOsascriptPaths() {
+        let out = "/tmp/one.txt\n/Users/me/two folder/\n\n"
+        let urls = FinderSelection.parse(out)
+        #expect(urls.map(\.path) == ["/tmp/one.txt", "/Users/me/two folder"])
+        #expect(urls[1].hasDirectoryPath)
+        #expect(FinderSelection.parse("").isEmpty)
+        #expect(FinderSelection.parse("\n").isEmpty)
+    }
+
+    @Test func mapsAppleEventErrors() {
+        let denied = "36:60: execution error: Not authorized to send Apple events to Finder. (-1743)"
+        #expect(AppleScriptRunner.map(stderr: denied) == .notPermitted)
+        #expect(AppleScriptRunner.map(stderr: "1:2: execution error: Finder got an error: Connection is invalid. (-600)\n") == .finderNotRunning)
+        #expect(AppleScriptRunner.map(stderr: "x: execution error: Finder got an error: AppleEvent timed out. (-1712)") == .timedOut)
+        #expect(AppleScriptRunner.map(stderr: "1:2: execution error: Boom. (-2700)") == .script("Boom. (-2700)"))
+    }
+
+    // Real osascript runs that never address another app.
+    @Test func runsOffMainAndReturnsOutput() async {
+        let r = await AppleScriptRunner.run(["return \"/tmp/a\" & linefeed & \"/etc/\""], timeout: 10)
+        guard case .success(let out) = r else { Issue.record("osascript failed: \(r)"); return }
+        #expect(FinderSelection.parse(out).map(\.path) == ["/tmp/a", "/etc"])
+    }
+
+    @Test func mapsRealErrorNumber() async {
+        let r = await AppleScriptRunner.run(["error \"Not authorized\" number -1743"], timeout: 10)
+        #expect(r == .failure(.notPermitted))
+    }
+
+    @Test func timesOutAndKillsScript() async {
+        let start = Date()
+        let r = await AppleScriptRunner.run(["delay 60"], timeout: 0.5)
+        #expect(r == .failure(.timedOut))
+        // Script sleeps 60 s: returning well before proves the kill. Loose bound for full-suite load.
+        #expect(Date().timeIntervalSince(start) < 30)
     }
 }
 

@@ -119,15 +119,15 @@ enum PDFExport {
     // MARK: EPUB
 
     /// EPUB 3 (with an EPUB 2 NCX for older readers): one XHTML chapter per page, reflowed paragraphs.
-    static func epub(pages: [String], title: String, author: String?, language: String = "en") -> Data {
+    static func epub(pages: [String], title: String, author: String?, language: String = "en") throws -> Data {
         let uid = "urn:uuid:" + UUID().uuidString.lowercased()
         let modified = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: #"\.\d+"#, with: "", options: .regularExpression)
         let t = xml(title)
         let lang = xml(language)
 
         var zip = ZipWriter()
-        zip.add("mimetype", Data("application/epub+zip".utf8), compress: false)
-        zip.add("META-INF/container.xml", Data("""
+        try zip.add("mimetype", Data("application/epub+zip".utf8), compress: false)
+        try zip.add("META-INF/container.xml", Data("""
         <?xml version="1.0" encoding="UTF-8"?>
         <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
           <rootfiles>
@@ -156,7 +156,7 @@ enum PDFExport {
             """
         }
 
-        zip.add("OEBPS/content.opf", Data("""
+        try zip.add("OEBPS/content.opf", Data("""
         <?xml version="1.0" encoding="UTF-8"?>
         <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="\(lang)">
           <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -173,7 +173,7 @@ enum PDFExport {
         </package>
         """.utf8))
 
-        zip.add("OEBPS/nav.xhtml", Data("""
+        try zip.add("OEBPS/nav.xhtml", Data("""
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE html>
         <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="\(lang)" xml:lang="\(lang)">
@@ -188,7 +188,7 @@ enum PDFExport {
         </html>
         """.utf8))
 
-        zip.add("OEBPS/toc.ncx", Data("""
+        try zip.add("OEBPS/toc.ncx", Data("""
         <?xml version="1.0" encoding="UTF-8"?>
         <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
           <head><meta name="dtb:uid" content="\(uid)"/></head>
@@ -198,7 +198,7 @@ enum PDFExport {
         </ncx>
         """.utf8))
 
-        zip.add("OEBPS/style.css", Data("""
+        try zip.add("OEBPS/style.css", Data("""
         body { font-family: serif; line-height: 1.45; margin: 0 5%; }
         h2 { font-size: 1em; color: #666; font-weight: normal; margin-top: 2em; }
         p { margin: 0 0 0.8em 0; text-align: left; }
@@ -207,7 +207,7 @@ enum PDFExport {
         for (i, text) in pages.enumerated() {
             let paras = paragraphs(text)
             let body = paras.isEmpty ? "<p class=\"empty\"></p>" : paras.map { "<p>\(xml($0))</p>" }.joined(separator: "\n    ")
-            zip.add("OEBPS/\(ids[i]).xhtml", Data("""
+            try zip.add("OEBPS/\(ids[i]).xhtml", Data("""
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE html>
             <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="\(lang)" xml:lang="\(lang)">

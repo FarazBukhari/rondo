@@ -85,12 +85,21 @@ public struct JobSpec: Hashable, Codable, Sendable {
         return d
     }
 
+    /// Non-finite doubles fall back to the default; out-of-range values clamp instead of trapping.
     public func int(_ key: String, default d: Int) -> Int {
         switch options[key] {
         case .int(let v)?: return v
-        case .double(let v)?: return Int(v)
+        case .double(let v)?: return Self.clampedInt(v) ?? d
         default: return d
         }
+    }
+
+    /// `Int(v)` that never traps: nil for NaN/±inf, clamped to Int range otherwise.
+    public static func clampedInt(_ v: Double) -> Int? {
+        guard v.isFinite else { return nil }
+        if v >= Double(Int.max) { return Int.max }
+        if v <= Double(Int.min) { return Int.min }
+        return Int(v)
     }
 
     public func double(_ key: String, default d: Double) -> Double {

@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var settings = Settings.load()
     private var registry: EngineRegistry
-    private var queue: JobQueue
+    private let queue: JobQueue
     private let recents = RecentOutputs.shared
 
     private let dragMonitor: DragMonitor
@@ -64,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         ImageEditor.tools = ToolLocator.fromSettings(settings)
+        TempDir.sweep()   // leftovers from crashes / forced quits (>1 h old)
         attachQueue()
         registerHotkey()
         dragMonitor.start()
@@ -71,13 +72,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         log.notice("Rondo launched: \(self.registry.allConversions.count) conversions, \(self.registry.allTools.count) tools")
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    /// Quit waits (bounded) for running jobs to cancel and clean their temp dirs, so no
+    /// ffmpeg/magick children or partial temp output outlive the app.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         ImageEditor.closeAll()
-        MediaEditor.closeAll()
+        let queue = self.queue
+        Task { @MainActor in
+            await MediaEditor.closeAllAndWait(timeout: 5)   // kills preview ffmpeg, removes scratch dirs
+            await queue.cancelAll()
+            let deadline = Date().addingTimeInterval(5)
+            while await queue.activeCount > 0, Date() < deadline {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
         dragMonitor.stop()
         hotkey.unregister()
-        let queue = self.queue
-        Task { await queue.cancelAll() }
     }
 
     // MARK: - Wiring
@@ -86,8 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func attachQueue() {
         hud?.stop()
         hud = ProgressHUD(queue: queue, recents: recents)
-        let registry = self.registry
-        hud.toolTitle = { registry.tool($0)?.title }
+        hud.toolTitle = { [weak self] in self?.registry.tool($0)?.title }
         hud.shouldReveal = { [weak self] in self?.settings.revealInFinder ?? true }
 
         busyWatcher?.cancel()
@@ -121,16 +134,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dragMonitor.settings = new
         dragMonitor.policy = Self.policy(for: new)
         if hotkeyChanged { registerHotkey() }
-        if toolsChanged {
-            let (registry, tools) = makeRegistry(settings: new)
+        if toolsChanged { scheduleRegistryRebuild() }
+    }
+
+    private var registryRebuild: DispatchWorkItem?
+
+    /// Tool-path fields change on every keystroke: rebuild engines once typing settles, then
+    /// swap them into the existing queue (HUD, busy indicator and running jobs are unaffected).
+    private func scheduleRegistryRebuild() {
+        registryRebuild?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let (registry, tools) = makeRegistry(settings: self.settings)
             ImageEditor.tools = tools
             self.registry = registry
-            wheel.itemProvider = RegistryWheelItemProvider(registry: registry)
-            let old = queue
-            queue = JobQueue(registry: registry, tools: tools)
-            attachQueue()
-            Task { _ = await old.activeCount }   // old queue drains its running jobs on its own
+            self.wheel.itemProvider = RegistryWheelItemProvider(registry: registry)
+            let queue = self.queue
+            Task { await queue.update(registry: registry, tools: tools) }
+            self.log.notice("engines rebuilt for new tool paths: \(registry.allConversions.count) conversions")
         }
+        registryRebuild = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
     }
 
     // MARK: - Wheel
@@ -138,7 +162,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Status-item / Float / hotkey entry: wheel kind from the modifiers held right now.
     private func openWheelForClick(_ urls: [URL], at point: CGPoint) {
         let held = DragMonitor.modifierKeys(in: NSEvent.modifierFlags)
-        let kind = held.lazy.compactMap { self.settings.wheel(for: $0) }.first ?? .convert
+        // Deterministic when several mapped modifiers are held: Convert, then Tools, then Actions.
+        let kind = WheelKind.allCases.first { kind in held.contains { self.settings.wheel(for: $0) == kind } } ?? .convert
         wheel.present(inputs: urls, at: point, kind: kind, mode: .click)
     }
 
@@ -176,16 +201,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.submit(.tool(id), urls: inputs, extra: options)
         }
         let id = tool.id.rawValue
-        // Image/media editors take one file each: open one window per file (capped).
+        // Single-file editors open one window per file (capped); merge arranges all files at once.
         let perFile = Array(urls.prefix(Self.maxEditorWindows))
         if id.hasPrefix("image.") {
             perFile.forEach { ImageEditor.open(url: $0, tool: tool.id, submit: submit) }
         } else if id.hasPrefix("video.") || id.hasPrefix("audio.") {
             perFile.forEach { MediaEditor.open(url: $0, tool: tool.id, submit: submit) }
-        } else if PDFOrganizer.supportedTools.contains(tool.id) {
+        } else if tool.id == "pdf.merge" {
             PDFOrganizer.open(urls: urls, tool: tool.id, submit: submit)
+            return true
+        } else if PDFOrganizer.supportedTools.contains(tool.id) {
+            perFile.forEach { PDFOrganizer.open(urls: [$0], tool: tool.id, submit: submit) }
         } else {
             return false
+        }
+        if urls.count > perFile.count {
+            showMessage("Opened \(perFile.count) of \(urls.count) files",
+                        detail: "\(tool.title) edits one file per window; Rondo opens at most \(Self.maxEditorWindows) at a time.")
         }
         return true
     }

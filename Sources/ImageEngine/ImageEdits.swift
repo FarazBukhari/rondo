@@ -26,18 +26,19 @@ enum ImageEdits {
 
         init() {}
 
+        /// Non-finite values fall back to neutral; everything is clamped to its slider range.
         init(job: JobSpec) {
-            brightness = job.double("brightness", default: 0)
-            contrast = job.double("contrast", default: 1)
-            saturation = job.double("saturation", default: 1)
-            exposure = job.double("exposure", default: 0)
-            gamma = job.double("gamma", default: 1)
-            vibrance = job.double("vibrance", default: 0)
-            hue = job.double("hue", default: 0)
-            temperature = job.double("temperature", default: 6500)
-            tint = job.double("tint", default: 0)
-            sharpness = job.double("sharpness", default: 0)
-            blur = job.double("blur", default: 0)
+            brightness = job.clamped("brightness", default: 0, -1...1)
+            contrast = job.clamped("contrast", default: 1, 0.25...4)
+            saturation = job.clamped("saturation", default: 1, 0...2)
+            exposure = job.clamped("exposure", default: 0, -3...3)
+            gamma = job.clamped("gamma", default: 1, 0.25...4)
+            vibrance = job.clamped("vibrance", default: 0, -1...1)
+            hue = job.clamped("hue", default: 0, -180...180)
+            temperature = job.clamped("temperature", default: 6500, 1000...50000)
+            tint = job.clamped("tint", default: 0, -150...150)
+            sharpness = job.clamped("sharpness", default: 0, 0...2)
+            blur = job.clamped("blur", default: 0, 0...100)
             filter = job.string("filter")?.lowercased() ?? "none"
         }
     }
@@ -111,9 +112,7 @@ enum ImageEdits {
     }
 
     static func annotate(_ image: CGImage, shapes: [Shape]) throws -> CGImage {
-        guard let ctx = ImageOps.context(width: image.width, height: image.height, like: image, opaque: !image.hasAlpha) else {
-            throw EngineError.failed("Can't create canvas")
-        }
+        let ctx = try ImageOps.context(width: image.width, height: image.height, like: image, opaque: !image.hasAlpha)
         let H = CGFloat(image.height)
         ctx.draw(image, in: CGRect(origin: .zero, size: image.size))
         ctx.setLineCap(.round)
@@ -123,7 +122,7 @@ enum ImageEdits {
         for s in shapes {
             try Task.checkCancellation()
             let color = ColorParser.parse(s.color) ?? CGColor(srgbRed: 1, green: 0.23, blue: 0.19, alpha: 1)
-            let lw = CGFloat(max(0.5, s.lineWidth ?? 4))
+            let lw = CGFloat(min(max(0.5, s.lineWidth ?? 4), 1000))
             ctx.setStrokeColor(color)
             ctx.setFillColor(color)
             ctx.setLineWidth(lw)
@@ -151,14 +150,13 @@ enum ImageEdits {
                 }
             case "text":
                 guard let text = s.text, !text.isEmpty else { continue }
-                drawText(text, at: CGPoint(x: s.x ?? 0, y: s.y ?? 0), size: CGFloat(s.fontSize ?? 32), fontName: s.font,
+                drawText(text, at: CGPoint(x: s.x ?? 0, y: s.y ?? 0), size: CGFloat(min(max(s.fontSize ?? 32, 1), 2000)), fontName: s.font,
                          color: color, in: ctx, canvasHeight: H)
             default:
                 throw EngineError.invalidInput("Unknown shape type \(s.type)")
             }
         }
-        guard let out = ctx.makeImage() else { throw EngineError.failed("Annotate render failed") }
-        return out
+        return try ImageOps.image(from: ctx)
     }
 
     /// Draws text with its top-left at `origin` (top-left canvas coordinates). Supports "\n".
@@ -192,31 +190,25 @@ enum ImageEdits {
         let H = CGFloat(image.height)
         switch style {
         case .black:
-            guard let ctx = ImageOps.context(width: image.width, height: image.height, like: image, opaque: !image.hasAlpha) else {
-                throw EngineError.failed("Can't create canvas")
-            }
+            let ctx = try ImageOps.context(width: image.width, height: image.height, like: image, opaque: !image.hasAlpha)
             ctx.draw(image, in: CGRect(origin: .zero, size: image.size))
             ctx.setFillColor(color ?? CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1))
             for r in regions { ctx.fill(cgRect(fromTopLeft: r, canvasHeight: H)) }
-            guard let out = ctx.makeImage() else { throw EngineError.failed("Redact render failed") }
-            return out
+            return try ImageOps.image(from: ctx)
         case .pixelate:
-            guard let ctx = ImageOps.context(width: image.width, height: image.height, like: image, opaque: !image.hasAlpha) else {
-                throw EngineError.failed("Can't create canvas")
-            }
+            let ctx = try ImageOps.context(width: image.width, height: image.height, like: image, opaque: !image.hasAlpha)
             ctx.draw(image, in: CGRect(origin: .zero, size: image.size))
             for r in regions {
                 guard let piece = image.cropping(to: r) else { continue }
                 let block = max(6, min(r.width, r.height) / 8)
                 let sw = max(1, Int((r.width / block).rounded())), sh = max(1, Int((r.height / block).rounded()))
-                let small = ImageOps.resized(piece, width: sw, height: sh)
+                let small = try ImageOps.resized(piece, width: sw, height: sh)
                 ctx.saveGState()
                 ctx.interpolationQuality = .none
                 ctx.draw(small, in: cgRect(fromTopLeft: r, canvasHeight: H))
                 ctx.restoreGState()
             }
-            guard let out = ctx.makeImage() else { throw EngineError.failed("Redact render failed") }
-            return out
+            return try ImageOps.image(from: ctx)
         case .blur:
             var ci = CIImage(cgImage: image)
             let base = ci
@@ -240,18 +232,15 @@ enum ImageEdits {
         var subject = image
         if mode != .fill { subject = try liftSubject(image) }
         if mode == .remove && padding == 0 { return subject }
-        let p = max(0, padding)
+        let p = min(max(0, padding), 10_000)
         let W = subject.width + 2 * p, H = subject.height + 2 * p
         let fillColor = mode == .remove ? CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 0) : color
         let opaque = fillColor.alpha >= 1 && mode != .remove
-        guard let ctx = ImageOps.context(width: W, height: H, like: image, opaque: opaque) else {
-            throw EngineError.failed("Can't create canvas")
-        }
+        let ctx = try ImageOps.context(width: W, height: H, like: image, opaque: opaque)
         ctx.setFillColor(fillColor)
         ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
         ctx.draw(subject, in: CGRect(x: p, y: p, width: subject.width, height: subject.height))
-        guard let out = ctx.makeImage() else { throw EngineError.failed("Background render failed") }
-        return out
+        return try ImageOps.image(from: ctx)
     }
 
     static func liftSubject(_ image: CGImage) throws -> CGImage {

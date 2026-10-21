@@ -75,6 +75,25 @@ enum ColorParser {
 // MARK: - Option helpers
 
 extension JobSpec {
+    /// Option as a finite Double, or nil when missing / NaN / ±inf.
+    func finite(_ key: String) -> Double? {
+        let v = double(key, default: .nan)
+        return v.isFinite ? v : nil
+    }
+
+    /// Finite option clamped to `range` (default when missing or non-finite).
+    func clamped(_ key: String, default d: Double, _ range: ClosedRange<Double>) -> Double {
+        min(max(finite(key) ?? d, range.lowerBound), range.upperBound)
+    }
+
+    /// Integer option, clamped in Double space before converting (never traps on huge / non-finite input).
+    func clampedInt(_ key: String, default d: Int, _ range: ClosedRange<Int>) -> Int {
+        Int(clamped(key, default: Double(d), Double(range.lowerBound)...Double(range.upperBound)).rounded())
+    }
+
+    /// 0…1 quality.
+    func unit(_ key: String, default d: Double) -> Double { clamped(key, default: d, 0...1) }
+
     /// Rect from a `list` option (x, y, w, h; top-left origin, source pixels), clamped to `bounds`.
     func topLeftRect(_ key: String, within size: CGSize) -> CGRect? {
         let v = list(key)
@@ -93,6 +112,7 @@ extension JobSpec {
 }
 
 func clampRect(_ r: CGRect, to size: CGSize) -> CGRect? {
+    guard [r.origin.x, r.origin.y, r.width, r.height].allSatisfy(\.isFinite) else { return nil }
     let c = r.standardized.integral.intersection(CGRect(origin: .zero, size: size))
     return (c.isNull || c.width < 1 || c.height < 1) ? nil : c
 }
@@ -107,6 +127,10 @@ func scratchDir(_ context: JobContext) throws -> URL {
     let d = context.tempDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
     return d
+}
+
+func byteString(_ n: Int) -> String {
+    ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file)
 }
 
 func fileSize(_ url: URL) -> Int {

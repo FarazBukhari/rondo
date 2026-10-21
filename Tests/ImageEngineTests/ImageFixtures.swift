@@ -109,7 +109,7 @@ enum Fx {
             return url
         default:
             guard let t = ImageFormats.utType(id) else { return nil }
-            if write(id == "jpg" || id == "bmp" ? ImageOps.flattened(img) : img, type: t, to: url) { return url }
+            if write(id == "jpg" || id == "bmp" ? try ImageOps.flattened(img) : img, type: t, to: url) { return url }
             let png = dir.appendingPathComponent("\(name)-src.png")
             write(img, type: "public.png", to: png)
             try? await magick([png.path, ImageCodec.magickPrefix(id) + url.path])
@@ -144,6 +144,65 @@ enum Fx {
     static func isWhite(_ p: RGBA) -> Bool { p.r > 235 && p.g > 235 && p.b > 235 && p.a > 235 }
 
     static func pdfPageCount(_ url: URL) -> Int { CGPDFDocument(url as CFURL)?.numberOfPages ?? 0 }
+
+    /// Four 20×10 quadrants (TL red, TR green, BL blue, BR yellow) on a 40×20 canvas — non-square on purpose.
+    static func quadrants() -> CGImage {
+        let ctx = CGContext(data: nil, width: 40, height: 20, bitsPerComponent: 8, bytesPerRow: 0, space: sRGB,
+                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        let fills: [(CGRect, CGColor)] = [
+            (CGRect(x: 0, y: 10, width: 20, height: 10), CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)),
+            (CGRect(x: 20, y: 10, width: 20, height: 10), CGColor(srgbRed: 0, green: 1, blue: 0, alpha: 1)),
+            (CGRect(x: 0, y: 0, width: 20, height: 10), CGColor(srgbRed: 0, green: 0, blue: 1, alpha: 1)),
+            (CGRect(x: 20, y: 0, width: 20, height: 10), CGColor(srgbRed: 1, green: 1, blue: 0, alpha: 1)),
+        ]
+        for (r, c) in fills { ctx.setFillColor(c); ctx.fill(r) }
+        return ctx.makeImage()!
+    }
+
+    /// Samples at the centers of the four quadrants of `img` (whatever its size): TL, TR, BL, BR.
+    static func quadrantColors(_ img: CGImage) -> [RGBA] {
+        let w = img.width, h = img.height
+        return [(w / 4, h / 4), (3 * w / 4, h / 4), (w / 4, 3 * h / 4), (3 * w / 4, 3 * h / 4)].map { pixel(img, $0.0, $0.1) }
+    }
+
+    static func close(_ a: RGBA, _ b: RGBA) -> Bool { abs(a.r - b.r) < 40 && abs(a.g - b.g) < 40 && abs(a.b - b.b) < 40 }
+
+    /// Width of every image XObject on page 1.
+    static func pdfImageWidths(_ url: URL) -> [Int] {
+        guard let doc = CGPDFDocument(url as CFURL) else { return [] }
+        return withExtendedLifetime(doc) { imageWidths(doc) }
+    }
+
+    private static func imageWidths(_ doc: CGPDFDocument) -> [Int] {
+        guard let page = doc.page(at: 1), let dict = page.dictionary else { return [] }
+        var res: CGPDFDictionaryRef?
+        guard CGPDFDictionaryGetDictionary(dict, "Resources", &res), let res else { return [] }
+        var xo: CGPDFDictionaryRef?
+        guard CGPDFDictionaryGetDictionary(res, "XObject", &xo), let xo else { return [] }
+        final class Box { var widths: [Int] = [] }
+        let box = Box()
+        CGPDFDictionaryApplyBlock(xo, { _, obj, _ in
+            var stream: CGPDFStreamRef?
+            if CGPDFObjectGetValue(obj, .stream, &stream), let stream, let sd = CGPDFStreamGetDictionary(stream) {
+                var w: CGPDFInteger = 0
+                if CGPDFDictionaryGetInteger(sd, "Width", &w) { box.widths.append(w) }
+            }
+            return true
+        }, nil)
+        return box.widths
+    }
+
+    /// Renders page 1 of a PDF at 72 DPI.
+    static func renderPDF(_ url: URL) -> CGImage? {
+        guard let page = CGPDFDocument(url as CFURL)?.page(at: 1) else { return nil }
+        let box = page.getBoxRect(.mediaBox)
+        let ctx = CGContext(data: nil, width: Int(box.width), height: Int(box.height), bitsPerComponent: 8, bytesPerRow: 0, space: sRGB,
+                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(origin: .zero, size: box.size))
+        ctx.drawPDFPage(page)
+        return ctx.makeImage()
+    }
 }
 
 final class ProgressLog: @unchecked Sendable {

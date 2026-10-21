@@ -95,6 +95,27 @@ func processMentioning(_ path: String) -> Bool {
     }
 
     @Test(.enabled(if: W7Fixtures.hasFFmpeg))
+    func shutdownWaitsForSupersededStillFrames() async throws {
+        let model = MediaEditorModel(url: try await W7Fixtures.shared.url("long.mkv"), panel: .snapshot, isVideo: true, tools: ToolLocator())
+        model.start()
+        #expect(await waitUntil {
+            if case .preparing = model.preview { return true } else { return false }
+        })
+        let work = try #require(model.workDir)
+        // Each seek supersedes the previous still frame; give each time to reach ffmpeg.
+        for t in [3.0, 9.0, 21.0] {
+            model.seek(to: t)
+            try await Task.sleep(nanoseconds: 180_000_000)
+        }
+        model.shutdown()
+        await model.waitForCleanup()
+        #expect(!FileManager.default.fileExists(atPath: work.path))
+        #expect(!processMentioning(work.path))
+        try await Task.sleep(nanoseconds: 300_000_000)   // nothing writes into it afterwards
+        #expect(!FileManager.default.fileExists(atPath: work.path))
+    }
+
+    @Test(.enabled(if: W7Fixtures.hasFFmpeg))
     func audioEditorBuildsWaveformAndBleepOptions() async throws {
         let url = try await W7Fixtures.shared.url("step.wav")
         let model = MediaEditorModel(url: url, panel: .bleep, isVideo: false, tools: ToolLocator())
@@ -246,6 +267,54 @@ func processMentioning(_ path: String) -> Bool {
         #expect(MediaEditor.controller(for: url) == nil)
         #expect(controller.model.isShutDown)
         await controller.model.waitForCleanup()
+    }
+
+    @Test(.enabled(if: W7Fixtures.hasFFmpeg))
+    func closeAllAndWaitKillsPreviewWorkAndRemovesScratchDirs() async throws {
+        let urls = [try await W7Fixtures.shared.url("long.mkv"), try await W7Fixtures.shared.url("long-b.mkv")]
+        let recorder = SubmitRecorder()
+        MediaEditor.open(url: urls[0], tool: "video.trim", tools: ToolLocator(), submit: recorder.handler)
+        MediaEditor.open(url: urls[1], tool: "video.crop", tools: ToolLocator(), submit: recorder.handler)
+        let models = try urls.map { try #require(MediaEditor.controller(for: $0)).model }
+        // Both are building playback proxies (MKV isn't AVFoundation-playable).
+        #expect(await waitUntil {
+            models.allSatisfy { if case .preparing = $0.preview { return true } else { return false } }
+        })
+        let dirs = try models.map { try #require($0.workDir) }
+        // Scrub so superseded still-frame jobs are in flight as well.
+        for m in models { m.seek(to: 5) }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        for m in models { m.seek(to: 12) }
+
+        await MediaEditor.closeAllAndWait(timeout: 120)   // generous: full-suite runs saturate the CPU
+        #expect(MediaEditor.openControllers.isEmpty)
+        let leftovers = Set((try? FileManager.default.contentsOfDirectory(atPath: TempDir.root.path)) ?? [])
+        for d in dirs {
+            #expect(!FileManager.default.fileExists(atPath: d.path), "\(d.lastPathComponent) survived")
+            #expect(!leftovers.contains(d.lastPathComponent))
+            #expect(!processMentioning(d.path), "ffmpeg still running for \(d.lastPathComponent)")
+        }
+        #expect(models.allSatisfy { $0.isShutDown && $0.preview != .proxy && $0.player == nil })
+        #expect(recorder.calls.isEmpty)
+        #expect(await waitUntil { MediaEditor.cleanupsInFlight == 0 })
+    }
+
+    @Test(.enabled(if: W7Fixtures.hasFFmpeg))
+    func closeAllAndWaitTimeoutStillRemovesScratchDirs() async throws {
+        let url = try await W7Fixtures.shared.url("long.mkv")
+        MediaEditor.open(url: url, tool: "video.split", tools: ToolLocator(), submit: { _, _, _ in })
+        let model = try #require(MediaEditor.controller(for: url)).model
+        #expect(await waitUntil {
+            if case .preparing = model.preview { return true } else { return false }
+        })
+        let dir = try #require(model.workDir)
+        await MediaEditor.closeAllAndWait(timeout: 0)
+        #expect(!FileManager.default.fileExists(atPath: dir.path))
+        await model.waitForCleanup()
+        #expect(!processMentioning(dir.path))
+        #expect(!FileManager.default.fileExists(atPath: dir.path))
+        // Nothing open → returns at once.
+        await MediaEditor.closeAllAndWait()
     }
 
     @Test func cancelButtonPathAndUnknownToolDefaults() async throws {

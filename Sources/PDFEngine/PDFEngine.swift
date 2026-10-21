@@ -37,9 +37,9 @@ public struct PDFDocumentEngine: Engine {
             OptionSpec(key: "every", title: "Pages per file", control: .integer(min: 1, max: 10_000), defaultValue: .int(1)),
         ]),
         ToolDescriptor(id: "pdf.reorder", title: "Reorganize Pages", symbol: "rectangle.grid.1x2", accepts: pdf, multiInput: .single, needsUI: true, options: [
-            OptionSpec(key: "order", title: "Page order (1-based)", control: .text, defaultValue: nil),
-            OptionSpec(key: "rotations", title: "Rotation per output page (°)", control: .text, defaultValue: nil),
-            OptionSpec(key: "deletions", title: "Pages to delete (1-based)", control: .text, defaultValue: nil),
+            OptionSpec(key: "order", title: "Source pages in output order (1-based; omit = 1…N)", control: .text, defaultValue: nil),
+            OptionSpec(key: "rotations", title: "Clockwise ° per entry of order (or of pages 1…N), before deletions", control: .text, defaultValue: nil),
+            OptionSpec(key: "deletions", title: "Source pages to drop (1-based)", control: .text, defaultValue: nil),
         ]),
         ToolDescriptor(id: "pdf.text.extract", title: "Extract Text", symbol: "doc.plaintext", accepts: pdf, options: [
             OptionSpec(key: "ocr", title: "OCR pages without text", control: .toggle, defaultValue: .bool(true)),
@@ -123,8 +123,8 @@ public struct PDFDocumentEngine: Engine {
         let doc = try PDFSupport.open(input)
         let scratch = try PDFSupport.scratchDir(context)
         let folder = scratch.appendingPathComponent("pages", isDirectory: true)
-        let dpi = Double(job.int("dpi", default: 300))
-        let files = try PDFRender.renderPages(doc, format: format, dpi: dpi, quality: job.double("quality", default: 0.9),
+        let dpi = job.clamped("dpi", default: 300, 18...2400)
+        let files = try PDFRender.renderPages(doc, format: format, dpi: dpi, quality: job.clamped("quality", default: 0.9, 0...1),
                                               into: folder) { progress($0 * 0.95) }
         context.log("\(input.lastPathComponent): \(files.count) page(s) → \(format) @ \(Int(dpi)) DPI")
         return try commitPages(files, folder: folder, for: input, ext: format, context: context)
@@ -166,7 +166,7 @@ public struct PDFDocumentEngine: Engine {
         try requireText(pages, input: input, ocr: ocr)
         let author = doc.documentAttributes?[PDFDocumentAttribute.authorAttribute] as? String
         let lang = Locale.preferredLanguages.first.map { String($0.prefix(while: { $0 != "-" && $0 != "_" })) } ?? "en"
-        let data = PDFExport.epub(pages: pages, title: title(of: doc, input: input), author: author, language: lang)
+        let data = try PDFExport.epub(pages: pages, title: title(of: doc, input: input), author: author, language: lang)
         let out = try PDFSupport.scratchDir(context).appendingPathComponent("book.epub")
         try data.write(to: out)
         return try commit(out, for: input, ext: "epub", context: context)
@@ -177,7 +177,7 @@ public struct PDFDocumentEngine: Engine {
     private func textTo(_ input: URL, format: String, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
         let text = try PDFSupport.readText(input)
         var style = PDFRender.TextStyle()
-        style.fontSize = CGFloat(min(max(job.double("fontSize", default: 10), 4), 96))
+        style.fontSize = CGFloat(job.clamped("fontSize", default: 10, 4...96))
         style.monospaced = (job.string("font") ?? "mono") != "sans"
         style.pageSize = PDFSupport.pageSize(job.string("pageSize"))
         let base = OutputNamer.baseName(of: input)
@@ -191,8 +191,8 @@ public struct PDFDocumentEngine: Engine {
         }
         guard let doc = PDFDocument(data: pdfData) else { throw EngineError.failed("Typesetting failed") }
         let folder = scratch.appendingPathComponent("pages", isDirectory: true)
-        let files = try PDFRender.renderPages(doc, format: format, dpi: Double(job.int("dpi", default: 150)),
-                                              quality: job.double("quality", default: 0.9), into: folder) { progress(0.4 + $0 * 0.55) }
+        let files = try PDFRender.renderPages(doc, format: format, dpi: job.clamped("dpi", default: 150, 18...2400),
+                                              quality: job.clamped("quality", default: 0.9, 0...1), into: folder) { progress(0.4 + $0 * 0.55) }
         return try commitPages(files, folder: folder, for: input, ext: format, context: context)
     }
 
@@ -201,19 +201,26 @@ public struct PDFDocumentEngine: Engine {
     private func compress(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
         let scratch = try PDFSupport.scratchDir(context)
         let original = PDFSupport.fileSize(input)
-        var target: Int? = job.int("targetBytes", default: 0) > 0 ? job.int("targetBytes", default: 0) : nil
-        if target == nil, case let p = job.double("percent", default: 0), p > 0 {
+        // Explicit byte target is strict (fail if unreachable); percent is best-effort.
+        let explicit = job.finite("targetBytes").map { Int(min(max($0, 0), 1e15)) }.flatMap { $0 > 0 ? $0 : nil }
+        var target = explicit
+        if target == nil, let p = job.finite("percent"), p > 0 {
             target = max(1, Int(Double(original) * (1 - min(p, 99) / 100)))
         }
         let mode = PDFTools.CompressMode(rawValue: job.string("mode") ?? "images") ?? .images
-        var result = try PDFTools.compress(input, mode: mode, quality: job.double("quality", default: 0.6),
-                                           dpi: Double(job.int("dpi", default: 150)), targetBytes: target,
-                                           scratch: scratch, progress: { progress($0 * 0.95) })
+        let outcome = try PDFTools.compress(input, mode: mode, quality: job.clamped("quality", default: 0.6, 0...1),
+                                            dpi: job.clamped("dpi", default: 150, 18...1200), targetBytes: target,
+                                            scratch: scratch, progress: { progress($0 * 0.95) })
+        var result = outcome.result
         if result.size >= original {
             let copy = scratch.appendingPathComponent("orig.pdf")
             try FileManager.default.copyItem(at: input, to: copy)
             result = .init(url: copy, size: original)
             context.log("\(input.lastPathComponent): already as small as requested; kept original bytes")
+        }
+        if let explicit, result.size > explicit {
+            throw EngineError.failed("Couldn't get \(input.lastPathComponent) under \(PDFSupport.byteString(explicit)); "
+                                     + "smallest achievable ≈ \(PDFSupport.byteString(min(outcome.smallest, original)))")
         }
         context.log("\(input.lastPathComponent): \(original) → \(result.size) bytes")
         return try commit(result.url, for: input, ext: "pdf", suffix: "compressed", context: context)
@@ -230,7 +237,7 @@ public struct PDFDocumentEngine: Engine {
     private func split(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) throws -> URL {
         let doc = try PDFSupport.open(input)
         let n = doc.pageCount
-        let parts = PDFTools.splitRanges(job.ranges("ranges"), every: job.int("every", default: 1), pageCount: n)
+        let parts = PDFTools.splitRanges(job.ranges("ranges"), every: job.clampedInt("every", default: 1, 1...max(1, n)), pageCount: n)
         guard !parts.isEmpty else { throw EngineError.invalidInput("No valid page ranges (document has \(n) pages)") }
         let scratch = try PDFSupport.scratchDir(context)
         let folder = scratch.appendingPathComponent("split", isDirectory: true)
@@ -238,7 +245,8 @@ public struct PDFDocumentEngine: Engine {
         var files: [URL] = []
         for (i, r) in parts.enumerated() {
             try Task.checkCancellation()
-            let url = folder.appendingPathComponent("\(PDFTools.rangeName(r, of: n)).pdf")
+            // Duplicate ranges get Finder-style "Pages 1-2 2.pdf" instead of overwriting each other.
+            let url = OutputNamer.unique(folder.appendingPathComponent("\(PDFTools.rangeName(r, of: n)).pdf"))
             try PDFTools.extract(doc, pages: r, to: url)
             files.append(url)
             progress(Double(i + 1) / Double(parts.count) * 0.95)
@@ -256,7 +264,7 @@ public struct PDFDocumentEngine: Engine {
         let n = doc.pageCount
         let order = job.pageList("order", pageCount: n)
         if !job.list("order").isEmpty && order.isEmpty { throw EngineError.invalidInput("`order` has no valid pages (1…\(n))") }
-        let rotations = job.list("rotations").map { Int($0.rounded()) }
+        let rotations = job.quarterTurns("rotations")
         let deletions = Set(job.pageList("deletions", pageCount: n))
         let out = try PDFSupport.scratchDir(context).appendingPathComponent("reordered.pdf")
         try PDFTools.reorder(doc, order: order, rotations: rotations, deletions: deletions, to: out)

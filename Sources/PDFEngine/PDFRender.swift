@@ -6,15 +6,21 @@ import RondoKit
 
 /// Page rasterization and plain-text typesetting.
 enum PDFRender {
-    /// Renders one page (crop box, rotation and annotations applied) onto white at `dpi`.
-    static func render(_ page: PDFPage, dpi: Double, maxPixels: Int = 16_384) throws -> CGImage {
+    /// Default cap on a rendered page's total pixels (≈ 200 MB at 8-bit RGBA); DPI is lowered to fit.
+    static let maxArea = 50_000_000
+
+    /// Renders one page (crop box, rotation and annotations applied) onto white at `dpi`, lowering the
+    /// effective DPI so the bitmap stays within `maxPixels` per side and `maxArea` in total.
+    static func render(_ page: PDFPage, dpi: Double, maxPixels: Int = 16_384, maxArea: Int = maxArea) throws -> CGImage {
         let box = page.bounds(for: .cropBox)
         let rot = ((page.rotation % 360) + 360) % 360
         let size = (rot == 90 || rot == 270) ? CGSize(width: box.height, height: box.width) : box.size
-        guard size.width > 0, size.height > 0 else { throw EngineError.invalidInput("Empty page") }
-        var scale = max(1, dpi) / 72
+        guard size.width > 0, size.height > 0, size.width.isFinite, size.height.isFinite else { throw EngineError.invalidInput("Empty page") }
+        var scale = (dpi.isFinite ? min(max(1, dpi), 2400) : 300) / 72
         let longest = max(size.width, size.height) * scale
         if longest > CGFloat(maxPixels) { scale *= Double(maxPixels) / Double(longest) }
+        let area = Double(size.width * size.height) * scale * scale
+        if area > Double(maxArea) { scale *= sqrt(Double(maxArea) / area) * 0.999 }
         let w = max(1, Int((size.width * scale).rounded())), h = max(1, Int((size.height * scale).rounded()))
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: PDFSupport.sRGB,
                                   bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {

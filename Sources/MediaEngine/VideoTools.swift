@@ -181,13 +181,15 @@ extension FFmpegEngine {
         let info = try await ff.probe(input)
         try requireVideo(info, input)
         let rect = job.list("rect")
-        guard rect.count == 4, let size = info.displaySize else {
-            throw EngineError.invalidInput("Crop needs rect = x,y,w,h")
+        guard rect.count == 4, rect.allSatisfy(\.isFinite), let size = info.displaySize else {
+            throw EngineError.invalidInput("Crop needs rect = x,y,w,h (finite numbers)")
         }
-        let x = min(max(0, Int(rect[0].rounded())), size.width - 2)
-        let y = min(max(0, Int(rect[1].rounded())), size.height - 2)
-        let w = min(Int(rect[2].rounded()), size.width - x) / 2 * 2
-        let h = min(Int(rect[3].rounded()), size.height - y) / 2 * 2
+        // Clamp in Double before converting so absurd values can't trap.
+        let px = rect.map { Int(min(max($0.rounded(), -1e7), 1e7)) }
+        let x = min(max(0, px[0]), size.width - 2)
+        let y = min(max(0, px[1]), size.height - 2)
+        let w = min(px[2], size.width - x) / 2 * 2
+        let h = min(px[3], size.height - y) / 2 * 2
         guard w >= 2, h >= 2 else { throw EngineError.invalidInput("Crop rectangle is empty") }
         let out = ctx.tempFile(named: "out.\(srcFmt.preferredExtension)")
         let q = Quality(job)
@@ -280,7 +282,10 @@ extension FFmpegEngine {
         let work = progress.sub(0.05, 0.95)
         let out = ctx.tempFile(named: "out.\(srcFmt.preferredExtension)")
 
-        if Self.canConcatCopy(infos, container: container) {
+        // The ffconcat list is line-based: a CR/LF in a path would start a new directive (and with
+        // -safe 0 could pull in arbitrary files). Such names take the per-input re-encode path.
+        let listSafe = inputs.allSatisfy { !$0.path.contains(where: { $0 == "\n" || $0 == "\r" }) }
+        if listSafe && Self.canConcatCopy(infos, container: container) {
             let list = ctx.tempFile(named: "list.ffconcat")
             let body = "ffconcat version 1.0\n" + inputs.map { "file '\($0.path.replacingOccurrences(of: "'", with: "'\\''"))'\n" }.joined()
             try body.write(to: list, atomically: true, encoding: .utf8)
@@ -341,8 +346,10 @@ extension FFmpegEngine {
         let a0 = infos[0].audio
         if let a0, !container.copyAudio.contains(a0.codec) { return false }
         return infos.allSatisfy { info in
+            // Stream copy keeps only the first clip's display matrix: rotations must match too.
             guard let v = info.video,
-                  v.codec == v0.codec, v.width == v0.width, v.height == v0.height, v.pixFmt == v0.pixFmt
+                  v.codec == v0.codec, v.width == v0.width, v.height == v0.height, v.pixFmt == v0.pixFmt,
+                  normalizedRotation(v.rotation) == normalizedRotation(v0.rotation)
             else { return false }
             switch (info.audio, a0) {
             case (nil, nil): return true
@@ -350,6 +357,13 @@ extension FFmpegEngine {
             default: return false
             }
         }
+    }
+
+    /// Rotation in whole degrees, 0..<360 (nil → 0).
+    static func normalizedRotation(_ r: Double?) -> Int {
+        guard let r, r.isFinite else { return 0 }
+        let d = Int(r.rounded()) % 360
+        return d < 0 ? d + 360 : d
     }
 
     // MARK: video.snapshot

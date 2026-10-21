@@ -149,7 +149,12 @@ final class SettingsModel: ObservableObject {
     }
 
     func checkAutomation() {
-        automation = Permissions.checkAutomation()
+        guard automation != .checking else { return }
+        automation = .checking
+        Task { @MainActor [weak self] in
+            let status = await Permissions.checkAutomation()
+            self?.automation = status
+        }
     }
 
     // MARK: Hotkey recording
@@ -497,6 +502,7 @@ private struct PermissionsPane: View {
                 }
                 HStack {
                     Button("Check Now") { model.checkAutomation() }
+                        .disabled(model.automation == .checking)
                     Button("Open Automation Settings") { Permissions.openAutomationSettings() }
                 }
             } header: {

@@ -2,7 +2,7 @@ import AppKit
 import RondoKit
 
 /// Documents, subtitles, archives, spreadsheets and slides.
-/// Pure Swift / AppKit text system / Core Text, plus system tools (`textutil`, `ditto`, `tar`, `gzip`, `unzip`)
+/// Pure Swift / AppKit text system / Core Text, plus system tools (`textutil`, `ditto`, `tar`, `gzip`)
 /// and optional exporters (`soffice`, Keynote) for slides.
 public struct DocumentEngine: Engine {
     public let id = "docs"
@@ -36,9 +36,8 @@ public struct DocumentEngine: Engine {
         // Subtitles
         out += RondoKit.conversions(from: Self.subtitleFormats, to: Self.subtitleFormats + ["txt"])
 
-        // Spreadsheets (XLSX reading needs unzip)
-        let sheetInputs = locator.has("unzip") ? Self.spreadsheetFormats : ["csv", "tsv"]
-        out += RondoKit.conversions(from: sheetInputs, to: Self.spreadsheetFormats + ["pdf"])
+        // Spreadsheets (XLSX parts are read in-process)
+        out += RondoKit.conversions(from: Self.spreadsheetFormats, to: Self.spreadsheetFormats + ["pdf"])
 
         // Archives: create
         let hasDitto = locator.has("ditto"), hasTar = locator.has("tar"), hasGzip = locator.has("gzip")
@@ -55,7 +54,7 @@ public struct DocumentEngine: Engine {
 
         // Archives: extract
         var extractable: [String] = []
-        if hasDitto && locator.has("unzip") { extractable.append("zip") }
+        if hasDitto { extractable.append("zip") }   // listing/pre-scan is in-process (ZipReader)
         if hasTar { extractable += ["tar", "tar.gz"] }
         if hasGzip { extractable.append("gz") }
         if let tar = locator.url(for: "tar"), Probe.tarAdvertisesRAR(tar) { extractable.append("rar") }
@@ -101,7 +100,7 @@ public struct DocumentEngine: Engine {
             return try await Archives.create(input, to: to, context: context, progress: progress)
         }
         if to == "folder", Archives.extractSources.contains(from) {
-            return try await Archives.extract(input, from: from, context: context, progress: progress)
+            return try await Archives.extract(input, from: from, job: job, context: context, progress: progress)
         }
         if Self.subtitleFormats.contains(from), Self.subtitleFormats.contains(to) || to == "txt" {
             return try convertSubtitles(input, from: from, to: to, context: context)
@@ -207,7 +206,7 @@ public struct DocumentEngine: Engine {
         switch from {
         case "csv": rows = Delimited.parse(try DocSupport.readText(input), delimiter: ",")
         case "tsv": rows = Delimited.parse(try DocSupport.readText(input), delimiter: "\t")
-        default: rows = try await XLSX.read(input, context: context)
+        default: rows = try XLSX.read(input)
         }
         try Task.checkCancellation()
         progress(0.4)

@@ -410,3 +410,119 @@ extension ToolLocator {
         #expect(EngineRegistry(engines: [bare]).tools(for: [svg]).isEmpty)
     }
 }
+
+@Suite struct ImageReviewFixTests {
+    /// All 8 EXIF orientations on a NON-square image match ImageIO's own upright rendering.
+    @Test(arguments: 1...8)
+    func orientationMatchesImageIO(orientation: Int) async throws {
+        let dir = try Fx.dir("o\(orientation)")
+        defer { Fx.cleanup(dir) }
+        let src = dir.appendingPathComponent("q.tiff")
+        #expect(Fx.write(Fx.quadrants(), type: "public.tiff", to: src, props: [kCGImagePropertyOrientation as String: orientation]))
+        let isrc = try #require(CGImageSourceCreateWithURL(src as CFURL, nil))
+        let reference = try #require(CGImageSourceCreateThumbnailAtIndex(isrc, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 40,
+        ] as CFDictionary))
+        let out = try await RasterEngine().runTest(JobSpec(inputs: [src], operation: .convert(to: "png")))
+        let img = try #require(Fx.load(out[0]))
+        #expect(img.width == reference.width && img.height == reference.height, "o\(orientation): \(img.width)x\(img.height)")
+        let got = Fx.quadrantColors(img), want = Fx.quadrantColors(reference)
+        #expect(zip(got, want).allSatisfy(Fx.close), "o\(orientation): got \(got) want \(want)")
+    }
+
+    @Test func resizeRejectsRunawaySizes() async throws {
+        let dir = try Fx.dir("resize-cap")
+        defer { Fx.cleanup(dir) }
+        let src = try #require(try await Fx.fixture("png", in: dir, name: "a"))
+        let bad: [[String: OptionValue]] = [
+            ["width": .double(1e30)], ["height": .double(.infinity)], ["width": .double(.nan)],
+            ["percent": .double(1e6)], ["percent": .double(.nan)],
+            ["width": .int(20_000), "height": .int(20_000), "keepAspect": .bool(false)],
+        ]
+        for opts in bad {
+            await #expect(throws: EngineError.self, "\(opts)") {
+                _ = try await RasterEngine().runTest(JobSpec(inputs: [src], operation: .tool("image.resize"), options: opts))
+            }
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["a.png"])
+        #expect(throws: EngineError.self) { _ = try ImageOps.resized(Fx.pattern(), width: 70_000, height: 10) }
+        #expect(throws: EngineError.self) { _ = try ImageOps.context(width: 20_000, height: 20_000, like: nil, opaque: true) }
+    }
+
+    @Test func nonFiniteCropRectIsRejected() async throws {
+        let dir = try Fx.dir("crop-nan")
+        defer { Fx.cleanup(dir) }
+        let src = try #require(try await Fx.fixture("png", in: dir, name: "a"))
+        await #expect(throws: EngineError.self) {
+            _ = try await RasterEngine().runTest(JobSpec(inputs: [src], operation: .tool("image.crop"), options: ["rect": .list([.nan, 0, .infinity, 10])]))
+        }
+    }
+
+    @Test func compressTargetUnreachableFailsAndCommitsNothing() async throws {
+        let dir = try Fx.dir("strict")
+        defer { Fx.cleanup(dir) }
+        let src = dir.appendingPathComponent("photo.jpg")
+        Fx.write(Fx.noisy(), type: "public.jpeg", to: src)
+        do {
+            _ = try await RasterEngine().runTest(JobSpec(inputs: [src], operation: .tool("image.compress"), options: ["targetBytes": .int(100)]))
+            Issue.record("unreachable target should fail")
+        } catch let EngineError.failed(msg) {
+            #expect(msg.hasPrefix("Couldn't get photo.jpg under 100 bytes; smallest achievable ≈ "), "\(msg)")
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["photo.jpg"])
+        // Percent mode stays best-effort.
+        let p = try await RasterEngine().runTest(JobSpec(inputs: [src], operation: .tool("image.compress"), options: ["percent": .double(99)]))
+        #expect(p.count == 1)
+    }
+
+    /// images→PDF decodes at the page's need (300 DPI of the drawn size), and honors EXIF orientation.
+    @Test func imagesToPDFDownsamplesAndStaysUpright() async throws {
+        let dir = try Fx.dir("pdf-stream")
+        defer { Fx.cleanup(dir) }
+        let big = dir.appendingPathComponent("big.png")
+        Fx.write(Fx.pattern(width: 2400, height: 1600), type: "public.png", to: big)
+        let out = try await RasterEngine().runTest(JobSpec(inputs: [big], operation: .tool("image.toPDF"),
+                                                           options: ["pageSize": .string("letter"), "margin": .int(200)]))
+        // Landscape letter 792×612 − 2×200 margin → 392×212 area → image drawn 318×212 pt → ≤ 1325 px at 300 DPI.
+        let widths = Fx.pdfImageWidths(out[0])
+        #expect(!widths.isEmpty && widths.allSatisfy { $0 <= 1330 }, "\(widths)")
+
+        let rot = dir.appendingPathComponent("rot.jpg")
+        Fx.write(Fx.pattern(), type: "public.jpeg", to: rot, props: [kCGImagePropertyOrientation as String: 6])
+        let pdf = try await RasterEngine().runTest(JobSpec(inputs: [rot], operation: .convert(to: "pdf")))
+        let page = try #require(Fx.renderPDF(pdf[0]))
+        #expect(page.width == 120 && page.height == 160)
+        #expect(Fx.isRed(Fx.pixel(page, 113, 6)))
+    }
+
+    /// Collage lays out from probed (upright) sizes and decodes per cell.
+    @Test func collageUsesUprightProbedSizes() async throws {
+        let dir = try Fx.dir("collage-stream")
+        defer { Fx.cleanup(dir) }
+        let rot = dir.appendingPathComponent("rot.jpg")
+        Fx.write(Fx.pattern(), type: "public.jpeg", to: rot, props: [kCGImagePropertyOrientation as String: 6])
+        let png = try #require(try await Fx.fixture("png", in: dir, name: "flat"))
+        let out = try await RasterEngine().runTest(JobSpec(inputs: [rot, png], operation: .tool("image.collage"),
+                                                           options: ["layout": .string("horizontal"), "cellSize": .int(60), "spacing": .int(0), "format": .string("png")]))
+        let img = try #require(Fx.load(out[0]))
+        #expect(img.width == 45 + 80 && img.height == 60)
+        #expect(Fx.isRed(Fx.pixel(img, 42, 2)))       // rotated image's red block sits top-right of its cell
+    }
+
+    @Test func collageCanvasAreaIsCapped() throws {
+        var o = ImageCompose.CollageOptions()
+        o.cellSize = 4000
+        o.spacing = 0
+        o.maxArea = 1_000_000
+        let sizes = Array(repeating: CGSize(width: 4000, height: 3000), count: 9)
+        let canvas = try ImageCompose.collage(sizes: sizes, options: o) { _, maxPixel in
+            #expect(maxPixel <= 400)
+            return Fx.pattern()
+        }
+        #expect(canvas.width * canvas.height <= 1_000_000)
+        #expect(canvas.width == canvas.height)
+        o.maxArea = 100
+        #expect(throws: EngineError.self) { _ = try ImageCompose.collage(sizes: sizes, options: o) { _, _ in Fx.pattern() } }
+    }
+}

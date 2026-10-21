@@ -88,7 +88,8 @@ import RondoKit
         bare.searchDirectories = []
         let p = Set(DocumentEngine(tools: bare).conversions().map { "\($0.from)>\($0.to)" })
         #expect(!p.contains("html>md"), "html input needs textutil")
-        #expect(!p.contains("folder>zip") && !p.contains("zip>folder") && !p.contains("xlsx>csv"))
+        #expect(!p.contains("folder>zip") && !p.contains("zip>folder"), "archives need ditto/tar")
+        #expect(p.contains("xlsx>csv"), "XLSX parts are read in-process")
         #expect(p.contains("md>docx") && p.contains("srt>vtt") && p.contains("csv>xlsx"))
     }
 }

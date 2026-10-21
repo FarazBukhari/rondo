@@ -170,12 +170,17 @@ enum PDFWriter {
         let count = doc.numberOfPages
         let width = String(count).count
         var files: [URL] = []
+        let dpi = dpi.isFinite ? min(max(dpi, 36), 600) : 150
         let scale = dpi / 72
         for n in 1...count {
             try Task.checkCancellation()
             guard let page = doc.page(at: n) else { continue }
             let box = page.getBoxRect(.cropBox)
-            let w = max(1, Int((box.width * scale).rounded())), h = max(1, Int((box.height * scale).rounded()))
+            let pw = box.width * scale, ph = box.height * scale
+            guard pw.isFinite, ph.isFinite, pw <= 20_000, ph <= 20_000 else {
+                throw EngineError.failed("Page \(n) is too large to render at \(Int(dpi)) DPI")
+            }
+            let w = max(1, Int(pw.rounded())), h = max(1, Int(ph.rounded()))
             guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                       bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { continue }

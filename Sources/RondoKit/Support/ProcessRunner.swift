@@ -60,7 +60,12 @@ public enum ProcessRunner {
             let d = h.availableData
             if d.isEmpty { h.readabilityHandler = nil; group.leave() } else { state.appendStderr(d, limit: stderrLimit) }
         }
-        process.terminationHandler = { _ in group.leave() }
+        process.terminationHandler = { _ in
+            group.leave()
+            // A grandchild that inherited our pipes can keep EOF from ever arriving. Once the
+            // direct child has exited, give readers a short drain window, then finish anyway.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { state.drainTimeoutHandler?() }
+        }
 
         let command = ([executable.lastPathComponent] + arguments.prefix(3)).joined(separator: " ")
 
@@ -76,12 +81,17 @@ public enum ProcessRunner {
                 }
                 state.setProcess(process)
                 if let inPipe, let stdin {
+                    // Child may exit without reading: get EPIPE instead of a process-killing SIGPIPE.
+                    _ = fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
                     DispatchQueue.global().async {
                         try? inPipe.fileHandleForWriting.write(contentsOf: stdin)
                         try? inPipe.fileHandleForWriting.close()
                     }
                 }
-                group.notify(queue: .global()) {
+                let finish: @Sendable () -> Void = {
+                    guard state.claimFinish() else { return }   // resume exactly once
+                    outPipe.fileHandleForReading.readabilityHandler = nil
+                    errPipe.fileHandleForReading.readabilityHandler = nil
                     let code = process.terminationStatus
                     if state.wasCancelled {
                         cont.resume(throwing: CancellationError())
@@ -91,6 +101,8 @@ public enum ProcessRunner {
                         cont.resume(returning: ProcessResult(exitCode: code, stdout: state.stdoutString, stderrTail: state.stderrString))
                     }
                 }
+                state.drainTimeoutHandler = finish
+                group.notify(queue: .global(), execute: finish)
             }
         } onCancel: {
             state.cancel()
@@ -106,6 +118,22 @@ private final class RunState: @unchecked Sendable {
     private var stderr = Data()
     private var process: Process?
     private var cancelled = false
+    private var finished = false
+    /// Set once the continuation is armed; called if pipes don't reach EOF after the child exits.
+    var drainTimeoutHandler: (@Sendable () -> Void)? {
+        get { lock.withLock { _drainTimeoutHandler } }
+        set { lock.withLock { _drainTimeoutHandler = newValue } }
+    }
+    private var _drainTimeoutHandler: (@Sendable () -> Void)?
+
+    /// True for the first caller only.
+    func claimFinish() -> Bool {
+        lock.withLock {
+            if finished { return false }
+            finished = true
+            return true
+        }
+    }
     private let lineHandler: (@Sendable (String) -> Void)?
 
     init(lineHandler: (@Sendable (String) -> Void)?) {

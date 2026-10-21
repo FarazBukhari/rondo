@@ -24,8 +24,9 @@ enum ImageTools {
 
     /// Encodes at `quality` (0…1), or searches for the largest result ≤ `targetBytes`
     /// (binary search ≤ 8 encodes per pass; one downscale pass if even the lowest quality is too big).
+    /// `result` is the largest candidate ≤ target, else the smallest produced; `smallest` is the smallest size seen.
     static func compress(_ loaded: LoadedImage, format: String, quality: Double, targetBytes: Int?,
-                         tools: ToolLocator, scratch: URL, progress: @escaping (Double) -> Void) async throws -> Candidate {
+                         tools: ToolLocator, scratch: URL, progress: @escaping (Double) -> Void) async throws -> (result: Candidate, smallest: Int) {
         let palette = format == "png" || format == "gif"
         let props = loaded.carryProperties
 
@@ -42,7 +43,8 @@ enum ImageTools {
 
         guard let target = targetBytes, target > 0 else {
             progress(0.3)
-            return try await encode(loaded.image, quality)
+            let c = try await encode(loaded.image, quality)
+            return (c, c.size)
         }
 
         var image = loaded.image
@@ -71,10 +73,10 @@ enum ImageTools {
             guard ratio < 1 else { break }
             let w = max(1, Int(Double(image.width) * ratio)), h = max(1, Int(Double(image.height) * ratio))
             imageLog.notice("compress: downscaling to \(w)x\(h) to reach target")
-            image = ImageOps.resized(image, width: w, height: h)
+            image = try ImageOps.resized(image, width: w, height: h)
         }
         guard let result = best ?? smallest else { throw EngineError.failed("Compression produced no output") }
-        return result
+        return (result, smallest?.size ?? result.size)
     }
 
     /// PNG/GIF: reduce to a palette with magick (`quality` → 2…256 colors). Without magick, plain re-encode.
@@ -85,7 +87,8 @@ enum ImageTools {
         }
         let src = scratch.appendingPathComponent("q-src-\(UUID().uuidString.prefix(8)).png")
         try ImageCodec.writeImageIO(image, type: "public.png", to: src, quality: nil, properties: [:])
-        let colors = max(2, min(256, Int((pow(min(max(quality, 0), 1), 1.5) * 254).rounded()) + 2))
+        let q = quality.isFinite ? min(max(quality, 0), 1) : 0.7
+        let colors = max(2, min(256, Int((pow(q, 1.5) * 254).rounded()) + 2))
         var args = [src.path, "-dither", "FloydSteinberg", "-colors", String(colors)]
         if format == "png" { args += ["-define", "png:compression-level=9", "-define", "png:compression-filter=5"] }
         args.append(ImageCodec.magickPrefix(format) + out.path)

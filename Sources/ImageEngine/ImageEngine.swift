@@ -169,7 +169,11 @@ public struct RasterEngine: Engine {
     }
 
     private func load(_ input: URL, job: JobSpec, context: JobContext, scratch: URL) async throws -> LoadedImage {
-        try await ImageCodec.load(input, tools: context.tools, scratch: scratch, svgDPI: job.double("dpi", default: 96))
+        try await ImageCodec.load(input, tools: context.tools, scratch: scratch, svgDPI: job.clamped("dpi", default: 96, 18...1200))
+    }
+
+    private func probe(_ input: URL, job: JobSpec, context: JobContext, scratch: URL) async throws -> ImageSource {
+        try await ImageCodec.probe(input, tools: context.tools, scratch: scratch, svgDPI: job.clamped("dpi", default: 96, 18...1200))
     }
 
     /// Format an edited image is saved in: the input's own format when writable, else PNG.
@@ -187,14 +191,16 @@ public struct RasterEngine: Engine {
 
     private func convert(_ input: URL, to target: String, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) async throws -> URL {
         let scratch = try scratchDir(context)
-        let loaded = try await load(input, job: job, context: context, scratch: scratch)
-        progress(0.4)
         let out = scratch.appendingPathComponent("out.\(ImageFormats.ext(target))")
         if target == "pdf" {
-            try ImageCompose.writePDF([loaded], to: out, pageSize: .fit, margin: 0, quality: job.double("quality", default: 0.9),
+            let source = try await probe(input, job: job, context: context, scratch: scratch)
+            progress(0.3)
+            try ImageCompose.writePDF([source], to: out, pageSize: .fit, margin: 0, quality: job.unit("quality", default: 0.9),
                                       title: OutputNamer.baseName(of: input)) { _ in }
         } else {
-            try await ImageCodec.write(loaded.image, format: target, to: out, quality: job.double("quality", default: 0.85),
+            let loaded = try await load(input, job: job, context: context, scratch: scratch)
+            progress(0.4)
+            try await ImageCodec.write(loaded.image, format: target, to: out, quality: job.unit("quality", default: 0.85),
                                        properties: loaded.carryProperties, tools: context.tools, scratch: scratch)
         }
         progress(0.9)
@@ -210,12 +216,15 @@ public struct RasterEngine: Engine {
         guard loaded.sourceFormat != "svg" else { throw EngineError.unsupported("Compressing SVG (convert it first)") }
         let format = ImageTools.compressFormat(for: loaded.sourceFormat)
         let original = fileSize(input)
-        var target: Int? = job.int("targetBytes", default: 0) > 0 ? job.int("targetBytes", default: 0) : nil
-        if target == nil, case let p = job.double("percent", default: 0), p > 0 {
+        // Explicit byte target is strict (fail if unreachable); percent is best-effort.
+        let explicit = job.finite("targetBytes").map { Int(min(max($0, 0), 1e15)) }.flatMap { $0 > 0 ? $0 : nil }
+        var target = explicit
+        if target == nil, let p = job.finite("percent"), p > 0 {
             target = max(1, Int(Double(original) * (1 - min(p, 99) / 100)))
         }
-        var result = try await ImageTools.compress(loaded, format: format, quality: job.double("quality", default: 0.7),
-                                                   targetBytes: target, tools: context.tools, scratch: scratch, progress: progress)
+        let outcome = try await ImageTools.compress(loaded, format: format, quality: job.unit("quality", default: 0.7),
+                                                    targetBytes: target, tools: context.tools, scratch: scratch, progress: progress)
+        var result = outcome.result
         // Never hand back something bigger than the original in the same format.
         if result.size >= original, format == loaded.sourceFormat {
             let copy = scratch.appendingPathComponent("orig.\(ImageFormats.ext(format))")
@@ -223,33 +232,51 @@ public struct RasterEngine: Engine {
             result = .init(url: copy, size: original)
             context.log("\(input.lastPathComponent): already as small as requested; kept original bytes")
         }
+        if let explicit, result.size > explicit {
+            let best = min(outcome.smallest, format == loaded.sourceFormat ? original : .max)
+            throw EngineError.failed("Couldn't get \(input.lastPathComponent) under \(byteString(explicit)); smallest achievable ≈ \(byteString(best))")
+        }
         context.log("\(input.lastPathComponent): \(original) → \(result.size) bytes")
         return try commit(result.url, for: input, ext: ImageFormats.ext(format), suffix: "compressed", context: context)
     }
 
+    /// `width`/`height` (px) win over `percent` (scale %). Output is capped at `ImageOps.maxResizeArea`;
+    /// the target is validated from the probed size before anything is decoded.
     private func resize(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) async throws -> URL {
         let scratch = try scratchDir(context)
-        let loaded = try await load(input, job: job, context: context, scratch: scratch)
-        progress(0.3)
-        let img = loaded.image
-        let w0 = Double(img.width), h0 = Double(img.height)
-        let reqW = job.int("width", default: 0), reqH = job.int("height", default: 0)
+        let source = try await probe(input, job: job, context: context, scratch: scratch)
+        let w0 = Double(source.pixelSize.width), h0 = Double(source.pixelSize.height)
+        func dimension(_ key: String) throws -> Double? {
+            guard job.options[key] != nil else { return nil }
+            guard let v = job.finite(key) else { throw EngineError.invalidInput("`\(key)` must be a finite number") }
+            return v > 0 ? v : nil
+        }
+        let reqW = try dimension("width"), reqH = try dimension("height")
         let keep = job.bool("keepAspect", default: true)
         var w: Double, h: Double
-        switch (reqW > 0, reqH > 0) {
-        case (true, true):
-            if keep { let s = min(Double(reqW) / w0, Double(reqH) / h0); (w, h) = (w0 * s, h0 * s) } else { (w, h) = (Double(reqW), Double(reqH)) }
-        case (true, false): (w, h) = (Double(reqW), h0 * Double(reqW) / w0)
-        case (false, true): (w, h) = (w0 * Double(reqH) / h0, Double(reqH))
-        case (false, false):
-            let s = max(0.01, job.double("percent", default: 50) / 100)
-            (w, h) = (w0 * s, h0 * s)
+        switch (reqW, reqH) {
+        case let (rw?, rh?):
+            if keep { let s = min(rw / w0, rh / h0); (w, h) = (w0 * s, h0 * s) } else { (w, h) = (rw, rh) }
+        case let (rw?, nil): (w, h) = (rw, h0 * rw / w0)
+        case let (nil, rh?): (w, h) = (w0 * rh / h0, rh)
+        case (nil, nil):
+            let pct = job.double("percent", default: 50)
+            guard pct.isFinite, pct > 0 else { throw EngineError.invalidInput("`percent` must be a positive number") }
+            (w, h) = (w0 * pct / 100, h0 * pct / 100)
         }
-        let W = max(1, min(40_000, Int(w.rounded()))), H = max(1, min(40_000, Int(h.rounded())))
-        let resized = ImageOps.resized(img, width: W, height: H)
+        w = max(1, w.rounded()); h = max(1, h.rounded())
+        guard w.isFinite, h.isFinite, w * h <= Double(ImageOps.maxResizeArea), w <= Double(ImageOps.maxSide), h <= Double(ImageOps.maxSide) else {
+            throw EngineError.invalidInput(String(format: "Resizing to %.0f×%.0f px exceeds the %d MP limit", min(w, 9e15), min(h, 9e15),
+                                                  ImageOps.maxResizeArea / 1_000_000))
+        }
+        let W = Int(w), H = Int(h)
+        // Downscales decode straight to (about) the target size; upscales decode at full size.
+        let loaded = try ImageCodec.decode(source, maxPixel: max(W, H))
+        progress(0.4)
+        let resized = try ImageOps.resized(loaded.image, width: W, height: H)
         let format = editFormat(for: loaded, tools: context.tools)
         let out = scratch.appendingPathComponent("out.\(ImageFormats.ext(format))")
-        try await ImageCodec.write(resized, format: format, to: out, quality: job.double("quality", default: 0.9),
+        try await ImageCodec.write(resized, format: format, to: out, quality: job.unit("quality", default: 0.9),
                                    properties: loaded.carryProperties, tools: context.tools, scratch: scratch)
         progress(0.9)
         return try commit(out, for: input, ext: ImageFormats.ext(format), suffix: "resized", context: context)
@@ -271,7 +298,7 @@ public struct RasterEngine: Engine {
         progress(0.3)
         let format = editFormat(for: loaded, tools: context.tools)
         let out = scratch.appendingPathComponent("out.\(ImageFormats.ext(format))")
-        try await ImageTools.strip(loaded, format: format, quality: job.double("quality", default: 0.92), to: out,
+        try await ImageTools.strip(loaded, format: format, quality: job.unit("quality", default: 0.92), to: out,
                                    tools: context.tools, scratch: scratch)
         return try commit(out, for: input, ext: ImageFormats.ext(format), suffix: "stripped", context: context)
     }
@@ -287,65 +314,69 @@ public struct RasterEngine: Engine {
         return try commit(out, for: input, ext: "txt", suffix: "QR", context: context)
     }
 
+    /// Probes every input up front (sizes only), then decodes one page at a time while writing.
     private func toPDF(_ job: JobSpec, context: JobContext) async throws -> [URL] {
         let scratch = try scratchDir(context)
-        var items: [LoadedImage] = []
+        var sources: [ImageSource] = []
         for (i, input) in job.inputs.enumerated() {
             try Task.checkCancellation()
-            items.append(try await load(input, job: job, context: context, scratch: scratch))
-            context.progress(0.5 * Double(i + 1) / Double(job.inputs.count))
+            sources.append(try await probe(input, job: job, context: context, scratch: scratch))
+            context.progress(0.2 * Double(i + 1) / Double(job.inputs.count))
         }
         let first = job.inputs[0]
         let out = scratch.appendingPathComponent("out.pdf")
         let size = ImageCompose.PageSize(rawValue: job.string("pageSize") ?? "fit") ?? .fit
         let report = context.progress
-        try ImageCompose.writePDF(items, to: out, pageSize: size, margin: job.double("margin", default: 0),
-                                  quality: job.double("quality", default: 0.9), title: OutputNamer.baseName(of: first)) { report(0.5 + 0.5 * $0) }
+        try ImageCompose.writePDF(sources, to: out, pageSize: size, margin: job.clamped("margin", default: 0, 0...720),
+                                  quality: job.unit("quality", default: 0.9), title: OutputNamer.baseName(of: first)) { report(0.2 + 0.8 * $0) }
         return [try commit(out, for: first, ext: "pdf", suffix: job.inputs.count > 1 ? "images" : nil, context: context)]
     }
 
+    /// Lays out from probed sizes, then decodes each image at its cell's pixel size while drawing.
     private func collage(_ job: JobSpec, context: JobContext) async throws -> [URL] {
         guard job.inputs.count >= 2 else { throw EngineError.invalidInput("Collage needs at least 2 images") }
         let scratch = try scratchDir(context)
-        var images: [CGImage] = []
+        var sources: [ImageSource] = []
         for (i, input) in job.inputs.enumerated() {
             try Task.checkCancellation()
-            images.append(try await load(input, job: job, context: context, scratch: scratch).image)
-            context.progress(0.6 * Double(i + 1) / Double(job.inputs.count))
+            sources.append(try await probe(input, job: job, context: context, scratch: scratch))
+            context.progress(0.2 * Double(i + 1) / Double(job.inputs.count))
         }
         var o = ImageCompose.CollageOptions()
         o.layout = ImageCompose.Layout(rawValue: job.string("layout") ?? "grid") ?? .grid
-        o.columns = job.int("columns", default: 0)
-        o.cellSize = job.int("cellSize", default: 600)
-        o.spacing = job.int("spacing", default: 12)
+        o.columns = job.clampedInt("columns", default: 0, 0...1000)
+        o.cellSize = job.clampedInt("cellSize", default: 600, 16...8000)
+        o.spacing = job.clampedInt("spacing", default: 12, 0...1000)
         o.background = ColorParser.parse(job.string("background")) ?? o.background
         o.fill = job.bool("fill", default: false)
         var format = job.string("format") ?? "jpg"
         if !["jpg", "png", "heic", "tiff"].contains(format) || !ImageFormats.canWrite(format, tools: context.tools) { format = "jpg" }
         if o.background.alpha < 1 && format == "jpg" { format = "png" }
-        let canvas = try ImageCompose.collage(images, options: o)
-        context.progress(0.8)
+        let report = context.progress
+        let n = Double(sources.count)
+        let canvas = try ImageCompose.collage(sizes: sources.map(\.pixelSize), options: o) { i, maxPixel in
+            defer { report(0.2 + 0.6 * Double(i + 1) / n) }
+            return try ImageCodec.decode(sources[i], maxPixel: maxPixel).image
+        }
         let out = scratch.appendingPathComponent("collage.\(ImageFormats.ext(format))")
-        try await ImageCodec.write(canvas, format: format, to: out, quality: job.double("quality", default: 0.9),
+        try await ImageCodec.write(canvas, format: format, to: out, quality: job.unit("quality", default: 0.9),
                                    tools: context.tools, scratch: scratch)
         return [try commit(out, for: job.inputs[0], ext: ImageFormats.ext(format), suffix: "collage", context: context)]
     }
 
     private func crop(_ input: URL, job: JobSpec, context: JobContext, progress: @escaping (Double) -> Void) async throws -> URL {
-        try await edit(input, suffix: "cropped", job: job, context: context, progress: progress) { img, _ in
-            let rotated = ImageOps.rotated(img, degrees: job.int("rotation", default: 0),
-                                           flipH: job.bool("flipH", default: false), flipV: job.bool("flipV", default: false))
+        let degrees = job.clampedInt("rotation", default: 0, -3600...3600)
+        let flipH = job.bool("flipH", default: false), flipV = job.bool("flipV", default: false)
+        return try await edit(input, suffix: "cropped", job: job, context: context, progress: progress) { img, _ in
+            let rotated = try ImageOps.rotated(img, degrees: degrees, flipH: flipH, flipV: flipV)
             guard !job.list("rect").isEmpty else {
-                if rotated.width == img.width && rotated.height == img.height && job.int("rotation", default: 0) % 360 == 0
-                    && !job.bool("flipH", default: false) && !job.bool("flipV", default: false) {
-                    throw EngineError.invalidInput("crop needs a `rect` (x,y,w,h)")
-                }
+                if degrees % 360 == 0 && !flipH && !flipV { throw EngineError.invalidInput("crop needs a `rect` (x,y,w,h)") }
                 return rotated
             }
-            guard let rect = job.topLeftRect("rect", within: rotated.size), let out = ImageOps.cropped(rotated, to: rect) else {
+            guard let rect = job.topLeftRect("rect", within: rotated.size) else {
                 throw EngineError.invalidInput("Crop rect is outside the image")
             }
-            return out
+            return try ImageOps.cropped(rotated, to: rect)
         }
     }
 
@@ -354,7 +385,7 @@ public struct RasterEngine: Engine {
         let color = ColorParser.parse(job.string("color")) ?? CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
         let needsAlpha = mode == .remove || color.alpha < 1
         return try await edit(input, suffix: "background", job: job, context: context, progress: progress, needsAlpha: needsAlpha) { img, _ in
-            try ImageEdits.background(img, mode: mode, color: color, padding: job.int("padding", default: 0))
+            try ImageEdits.background(img, mode: mode, color: color, padding: job.clampedInt("padding", default: 0, 0...10_000))
         }
     }
 
@@ -369,7 +400,7 @@ public struct RasterEngine: Engine {
         progress(0.7)
         let format = editFormat(for: loaded, tools: context.tools, needsAlpha: needsAlpha)
         let out = scratch.appendingPathComponent("out.\(ImageFormats.ext(format))")
-        try await ImageCodec.write(result, format: format, to: out, quality: job.double("quality", default: 0.92),
+        try await ImageCodec.write(result, format: format, to: out, quality: job.unit("quality", default: 0.92),
                                    properties: loaded.carryProperties, tools: context.tools, scratch: scratch)
         return try commit(out, for: input, ext: ImageFormats.ext(format), suffix: suffix, context: context)
     }

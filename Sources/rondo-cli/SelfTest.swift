@@ -13,8 +13,11 @@ enum SelfTest {
         check("catalog ids unique", Set(FormatCatalog.all.map(\.id)).count == FormatCatalog.all.count)
         check("tar.gz detection", FormatCatalog.format(for: URL(fileURLWithPath: "/x/a.tar.gz"))?.id == "tar.gz")
 
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rondo-selftest-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let dir = try? TempDir.make(prefix: "selftest") else {
+            print("✘ temp dir")
+            return 1
+        }
+        defer { TempDir.remove(dir) }
         let input = dir.appendingPathComponent("a.png")
         FileManager.default.createFile(atPath: input.path, contents: Data([1]))
         FileManager.default.createFile(atPath: dir.appendingPathComponent("a.jpg").path, contents: Data([1]))

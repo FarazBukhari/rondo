@@ -93,18 +93,22 @@ import RondoKit
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["evil.tar"])
     }
 
-    @Test func escapingSymlinksRemoved() async throws {
+    @Test func escapingSymlinksRejectedBeforeExtraction() async throws {
         let dir = try W5.dir("arch-link")
-        let tar = dir.appendingPathComponent("links.tar")
-        try W5.ustar([
-            ("pkg/readme.txt", Data("hi".utf8), nil),
-            ("pkg/inside", Data(), "readme.txt"),
-            ("pkg/outside", Data(), "/etc/hosts"),
-            ("pkg/up", Data(), "../../../../etc"),
-        ]).write(to: tar)
-        let out = try await W5.one(tar, to: "folder")
-        let names = Set(try FileManager.default.contentsOfDirectory(atPath: out.path))
-        #expect(names == ["readme.txt", "inside"])
+        for (i, target) in ["/etc/hosts", "../../../../etc", "sub/../../x"].enumerated() {
+            let tar = dir.appendingPathComponent("links\(i).tar")
+            try W5.ustar([
+                ("pkg/readme.txt", Data("hi".utf8), nil),
+                ("pkg/inside", Data(), "readme.txt"),
+                ("pkg/bad", Data(), target),
+            ]).write(to: tar)
+            await #expect(throws: EngineError.self, "symlink -> \(target)") { try await W5.one(tar, to: "folder") }
+        }
+        // A safe relative link survives.
+        let ok = dir.appendingPathComponent("ok.tar")
+        try W5.ustar([("pkg/readme.txt", Data("hi".utf8), nil), ("pkg/inside", Data(), "readme.txt")]).write(to: ok)
+        let out = try await W5.one(ok, to: "folder")
+        #expect(Set(try FileManager.default.contentsOfDirectory(atPath: out.path)) == ["readme.txt", "inside"])
     }
 
     @Test func rarExtractionWhenSupported() async throws {

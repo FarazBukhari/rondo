@@ -15,12 +15,13 @@ public enum Permissions {
     public static func openAutomationSettings() { NSWorkspace.shared.open(automationSettingsURL) }
 
     public enum AutomationStatus: Equatable, Sendable {
-        case notChecked, allowed, denied, finderNotRunning
+        case notChecked, checking, allowed, denied, finderNotRunning
         case error(String)
 
         public var title: String {
             switch self {
             case .notChecked: "Not checked"
+            case .checking: "Checking…"
             case .allowed: "Allowed"
             case .denied: "Not allowed"
             case .finderNotRunning: "Finder isn't running"
@@ -29,11 +30,11 @@ public enum Permissions {
         }
     }
 
-    /// Sends Finder a harmless Apple Event (`get name`). Call only from an explicit user click:
-    /// the first attempt shows macOS's own consent prompt, where the user decides.
-    @MainActor
-    public static func checkAutomation() -> AutomationStatus {
-        switch AppleScriptRunner.run("tell application \"Finder\" to get name") {
+    /// Sends Finder a harmless Apple Event (`get name`) via `osascript`, off the main thread. Call only
+    /// from an explicit user click: the first attempt shows macOS's own consent prompt (generous
+    /// timeout so the user can answer it), where the user decides.
+    public static func checkAutomation(timeout: TimeInterval = 60) async -> AutomationStatus {
+        switch await AppleScriptRunner.run(["tell application \"Finder\" to get name"], timeout: timeout) {
         case .success: .allowed
         case .failure(.notPermitted): .denied
         case .failure(.finderNotRunning): .finderNotRunning

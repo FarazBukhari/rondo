@@ -27,6 +27,20 @@ import Testing
         }
     }
 
+    @Test func grandchildHoldingPipesDoesNotHang() async throws {
+        // The shell exits immediately; its backgrounded sleep keeps stdout/stderr open for 30 s.
+        let start = Date()
+        let r = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), ["-c", "echo hi; sleep 30 & exit 0"])
+        #expect(r.exitCode == 0)
+        #expect(Date().timeIntervalSince(start) < 15)
+    }
+
+    @Test func childIgnoringStdinDoesNotKillHost() async throws {
+        let big = Data(repeating: 0x41, count: 4 * 1024 * 1024)
+        let r = try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/true"), [], stdin: big)
+        #expect(r.exitCode == 0)
+    }
+
     @Test func stdinIsPiped() async throws {
         let r = try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/wc"), ["-c"], stdin: Data("12345".utf8))
         #expect(r.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "5")
@@ -124,7 +138,8 @@ final class LineCollector: @unchecked Sendable {
 
     @Test func cancelRunningJob() async throws {
         let inputs = try workspace(["a.jpg"])
-        let engine = StubEngine(id: "img", pairs: conversions(from: ["jpg"], to: ["png"]), delayNanos: 5_000_000_000)
+        // Long stub so the cancel always lands first, even when the full suite delays scheduling.
+        let engine = StubEngine(id: "img", pairs: conversions(from: ["jpg"], to: ["png"]), delayNanos: 120_000_000_000)
         let queue = JobQueue(registry: EngineRegistry(engines: [engine]))
         let stream = queue.subscribe()
         let ids = await queue.submit(JobSpec(inputs: inputs, operation: .convert(to: "png")))
@@ -134,6 +149,16 @@ final class LineCollector: @unchecked Sendable {
         guard case .cancelled? = events.last else { Issue.record("expected cancelled: \(events)"); return }
         let dir = inputs[0].deletingLastPathComponent()
         #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("a.png").path))
+    }
+
+    @Test func updateRegistrySwapsEnginesForNewJobs() async throws {
+        let inputs = try workspace(["a.jpg"])
+        let queue = JobQueue(registry: EngineRegistry(engines: []))
+        let stream = queue.subscribe()
+        await queue.update(registry: EngineRegistry(engines: [StubEngine(id: "img", pairs: conversions(from: ["jpg"], to: ["png"]))]), tools: ToolLocator())
+        await queue.submit(JobSpec(inputs: inputs, operation: .convert(to: "png")))
+        let events = await collect(stream, terminals: 1)
+        guard case .finished? = events.last else { Issue.record("expected finished after registry update: \(events)"); return }
     }
 
     @Test func heavyLimitRespected() async throws {
@@ -149,5 +174,26 @@ final class LineCollector: @unchecked Sendable {
             if e.isTerminal { concurrent -= 1 }
         }
         #expect(peak == 1)
+    }
+}
+
+@Suite struct TempDirTests {
+    @Test func sweepRemovesOnlyOldEntries() throws {
+        let old = try TempDir.make(prefix: "sweeptest-old")
+        let young = try TempDir.make(prefix: "sweeptest-young")
+        let past = Date().addingTimeInterval(-7200)
+        try FileManager.default.setAttributes([.modificationDate: past], ofItemAtPath: old.path)
+        TempDir.sweep(olderThan: 3600)
+        #expect(!FileManager.default.fileExists(atPath: old.path))
+        #expect(FileManager.default.fileExists(atPath: young.path))
+        TempDir.remove(young)
+    }
+
+    @Test func removeRefusesOutsideRoot() throws {
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("not-rondo-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        TempDir.remove(outside)
+        #expect(FileManager.default.fileExists(atPath: outside.path))
+        try FileManager.default.removeItem(at: outside)
     }
 }

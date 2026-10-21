@@ -13,7 +13,7 @@ Updated by `/orchestrate`. A box is checked only after the orchestrator ran the 
 - [x] **P5 Tool windows** — W6 Image editor · W7 Media editor · W8 PDF organizer
   - [x] W6  - [x] W7  - [x] W8
 - [x] **P6 Polish** — settings complete, original icon, release build, launch at login, permission onboarding
-- [ ] **P7 Verify** — clean release build, tests, smoke, review pass, clean-room audit
+- [x] **P7 Verify** — clean release build, tests, smoke, review pass, clean-room audit
 
 ## Toolchain (P0 fills)
 
@@ -44,6 +44,8 @@ Full run 2026-10-21 (P4 gate), `scripts/smoke.sh`, 4 engines, 403 conversions + 
 | **total** | **616** | **0** |
 
 P5 re-run 2026-10-21 (editors wired): 616/616, expected errors 5/5. Tests 386/386 (73 suites).
+
+P7 final 2026-10-21 (after review fixes): smoke 616/616, expected errors 5/5. Tests 449/449 (83 suites), two consecutive full runs. Release bundle x86_64, ad-hoc signed, launches with 403 conversions / 32 tools. Clean-room grep (Sources/Resources/scripts/Tests/Package.swift): no Tangerine refs; no networking APIs; only binary asset = AppIcon.icns from scripts/make-icon.sh.
 
 ## Manual QA (human only — never auto-checked)
 
@@ -76,6 +78,10 @@ P5 re-run 2026-10-21 (editors wired): 616/616, expected errors 5/5. Tests 386/38
 | 2026-10-21 | New setting `wheelTrigger` (press / quick tap), default press | Resolves ⌥-copy conflict by user choice; user confirmed tap mode |
 | 2026-10-21 | Media engine honors `crf` / `preset` / `audioBitrate` from Settings → Quality | P4 gap; app passes them on every video/audio job |
 | 2026-10-21 | PROGRESS.md truncated by a P5 sed range-delete; restored from 1d5d44c in P6 | Use Python edits with asserts, never open-ended sed ranges |
+| 2026-10-21 | P7 review: 3 reviewers (core+image/PDF, media+docs, app/UI) → ~50 findings; all HIGH/MED fixed with regression tests | See git log P7 |
+| 2026-10-21 | Archive extraction refuses symlinks/hardlinks with absolute or `..` targets, entries through symlinks, >100k entries or > min(20 GB, 80% free) | Safety over convenience; zipped `.app`/framework bundles with `../` links are refused (use Archive Utility for those) |
+| 2026-10-21 | Compress with `targetBytes` that can't be met fails with "smallest achievable ≈ X", commits nothing (image/PDF/video) | No silent "compressed" output above target |
+| 2026-10-21 | Quit = terminateLater: cancel jobs, await media-editor cleanup (≤5 s); stale temp swept at launch (>1 h old) | No orphan ffmpeg/temp dirs |
 
 ## Blockers
 

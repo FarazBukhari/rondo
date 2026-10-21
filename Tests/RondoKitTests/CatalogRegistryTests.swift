@@ -153,6 +153,17 @@ struct StubEngine: Engine {
         #expect(try JSONDecoder().decode(Settings.self, from: Data("{}".utf8)).wheelTrigger == .press)
     }
 
+    @Test func intOptionNeverTraps() {
+        let spec = JobSpec(inputs: [], operation: .tool("x"), options: [
+            "nan": .double(.nan), "inf": .double(.infinity), "huge": .double(1e30), "neg": .double(-1e30), "ok": .double(3.9),
+        ])
+        #expect(spec.int("nan", default: 7) == 7)
+        #expect(spec.int("inf", default: 7) == 7)
+        #expect(spec.int("huge", default: 7) == Int.max)
+        #expect(spec.int("neg", default: 7) == Int.min)
+        #expect(spec.int("ok", default: 7) == 3)
+    }
+
     @Test func clearedHotkeyStaysCleared() throws {
         var s = Settings()
         s.hotkey = nil

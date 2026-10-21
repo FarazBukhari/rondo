@@ -28,10 +28,10 @@ public enum JobEvent: Sendable {
 /// Runs jobs with bounded concurrency. Heavy jobs (video) are capped separately.
 /// Per-file operations are split into one job per input; inputs already in the target format are skipped.
 public actor JobQueue {
-    private let registry: EngineRegistry
+    private var registry: EngineRegistry
     private let heavyLimit: Int
     private let totalLimit: Int
-    private let tools: ToolLocator
+    private var tools: ToolLocator
     private let hub = EventHub()
 
     private var pending: [(id: UUID, spec: JobSpec, heavy: Bool)] = []
@@ -55,6 +55,13 @@ public actor JobQueue {
     }
 
     public var activeCount: Int { pending.count + running.count }
+
+    /// Swaps the engines/tool paths used for jobs started from now on (e.g. after the user
+    /// edits tool paths). Running jobs keep the engine they started with; subscribers are unaffected.
+    public func update(registry: EngineRegistry, tools: ToolLocator) {
+        self.registry = registry
+        self.tools = tools
+    }
 
     /// Queues `spec`, returning the job IDs it was split into (may be empty if nothing to do).
     @discardableResult

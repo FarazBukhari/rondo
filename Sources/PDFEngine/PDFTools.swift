@@ -75,8 +75,9 @@ enum PDFTools {
     /// Quality-only, or a search for the largest result ≤ `targetBytes`:
     /// 1. binary search on quality at `dpi`; 2. if even the lowest quality is too big, binary search the DPI
     /// (at quality 0.5) and refine quality there; 3. if images mode still can't fit, repeat with rasterized pages.
+    /// Returns the largest candidate ≤ target (else the smallest produced) and the smallest size seen.
     static func compress(_ input: URL, mode: CompressMode, quality: Double, dpi: Double, targetBytes: Int?, scratch: URL,
-                         progress: (Double) -> Void) throws -> Candidate {
+                         progress: (Double) -> Void) throws -> (result: Candidate, smallest: Int) {
         var attempt = 0
         func encode(_ m: CompressMode, _ q: Double, _ d: Double) throws -> Candidate {
             try Task.checkCancellation()
@@ -96,7 +97,8 @@ enum PDFTools {
 
         guard let target = targetBytes, target > 0 else {
             progress(0.2)
-            return try encode(mode, quality, dpi)
+            let c = try encode(mode, quality, dpi)
+            return (c, c.size)
         }
 
         var best: Candidate?          // largest ≤ target
@@ -143,7 +145,7 @@ enum PDFTools {
             if best != nil { break }
         }
         guard let result = best ?? smallest else { throw EngineError.failed("Compression produced no output") }
-        return result
+        return (result, smallest?.size ?? result.size)
     }
 
     // MARK: Merge / split / reorder
@@ -164,15 +166,20 @@ enum PDFTools {
     }
 
     /// 1-based inclusive page ranges. Empty `ranges` → chunks of `every` pages.
+    /// Ranges are clamped to the document in Double space (open ends like `1-inf` mean "to the last page");
+    /// NaN or fully out-of-range entries are dropped. `every` is clamped to 1…pageCount.
     static func splitRanges(_ ranges: [ClosedRange<Double>], every: Int, pageCount: Int) -> [ClosedRange<Int>] {
+        guard pageCount > 0 else { return [] }
+        let last = Double(pageCount)
         if !ranges.isEmpty {
             return ranges.compactMap { r in
-                let lo = max(1, Int(r.lowerBound.rounded())), hi = min(pageCount, Int(r.upperBound.rounded()))
-                return lo <= hi ? lo...hi : nil
+                let a = r.lowerBound.rounded(), b = r.upperBound.rounded()
+                guard !a.isNaN, !b.isNaN, b >= 1, a <= last else { return nil }
+                return Int(max(1, a))...Int(min(last, b))
             }
         }
-        let n = max(1, every)
-        return stride(from: 1, through: pageCount, by: n).map { $0...min(pageCount, $0 + n - 1) }
+        let n = min(max(1, every), pageCount)
+        return stride(from: 1, through: pageCount, by: n).map { $0...min(pageCount, $0 + (n - 1)) }
     }
 
     static func extract(_ doc: PDFDocument, pages: ClosedRange<Int>, to out: URL) throws {
@@ -189,9 +196,11 @@ enum PDFTools {
             : "Pages \(PDFSupport.pageName(r.lowerBound, of: count).dropFirst(5))-\(PDFSupport.pageName(r.upperBound, of: count).dropFirst(5))"
     }
 
-    /// `order`: 1-based source pages in output order (repeats allowed; default = all).
-    /// `rotations`: degrees added to each output page, parallel to `order` (missing = 0).
-    /// `deletions`: 1-based source pages to drop.
+    /// Matches W8's organizer encodings (`PageArrangement.options`):
+    /// - `order`: 1-based source pages in output order (repeats allowed). Omitted → 1…N.
+    /// - `rotations`: clockwise degrees, one per entry of that sequence — i.e. parallel to `order`, or to
+    ///   source pages 1…N when `order` is omitted — indexed *before* deletions (missing = 0).
+    /// - `deletions`: 1-based source pages dropped from the sequence (their rotation entries are ignored).
     static func reorder(_ doc: PDFDocument, order: [Int], rotations: [Int], deletions: Set<Int>, to out: URL) throws {
         let sequence = order.isEmpty ? Array(1...doc.pageCount) : order
         let result = PDFDocument()
@@ -208,14 +217,37 @@ enum PDFTools {
 
     // MARK: Metadata
 
-    /// Drops the document info (title/author/subject/keywords/creator/dates) and XMP by rewriting the file.
+    /// Rebuilds the document from copies of its pages: drops the Info dictionary (title/author/subject/
+    /// keywords/creator/dates) and the catalog's XMP `/Metadata` stream, which a plain rewrite keeps.
+    /// The outline (bookmarks) is carried over.
     static func stripMetadata(_ input: URL, to out: URL) throws {
         let doc = try PDFSupport.open(input)
-        doc.documentAttributes = [:]
-        let options: [PDFDocumentWriteOption: Any] = [
-            PDFDocumentWriteOption(rawValue: kCGPDFContextCreator as String): "",
-            PDFDocumentWriteOption(rawValue: kCGPDFContextAuthor as String): "",
-        ]
-        guard doc.write(to: out, withOptions: options) else { throw EngineError.failed("Writing PDF failed") }
+        let clean = PDFDocument()
+        for i in 0..<doc.pageCount {
+            try Task.checkCancellation()
+            guard let page = doc.page(at: i)?.copy() as? PDFPage else { continue }
+            clean.insert(page, at: clean.pageCount)
+        }
+        if let root = doc.outlineRoot, root.numberOfChildren > 0 {
+            let newRoot = PDFOutline()
+            copyOutline(root, into: newRoot, from: doc, to: clean)
+            clean.outlineRoot = newRoot
+        }
+        guard clean.pageCount > 0, clean.write(to: out) else { throw EngineError.failed("Writing PDF failed") }
+    }
+
+    private static func copyOutline(_ src: PDFOutline, into dst: PDFOutline, from old: PDFDocument, to new: PDFDocument) {
+        for i in 0..<src.numberOfChildren {
+            guard let child = src.child(at: i) else { continue }
+            let item = PDFOutline()
+            item.label = child.label
+            item.isOpen = child.isOpen
+            if let dest = child.destination, let page = dest.page {
+                let idx = old.index(for: page)
+                if idx != NSNotFound, let target = new.page(at: idx) { item.destination = PDFDestination(page: target, at: dest.point) }
+            }
+            dst.insertChild(item, at: dst.numberOfChildren)
+            copyOutline(child, into: item, from: old, to: new)
+        }
     }
 }

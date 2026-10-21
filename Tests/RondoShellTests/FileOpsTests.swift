@@ -1,4 +1,5 @@
 import Foundation
+import RondoKit
 import Testing
 @testable import RondoShell
 
@@ -129,5 +130,125 @@ func contents(_ url: URL) -> String? {
         let out = FileMover.move([file], to: notDir)
         if case .failed = out[0].status {} else { Issue.record("expected failure") }
         #expect(FileManager.default.fileExists(atPath: file.path))
+    }
+}
+
+private func setPermissions(_ url: URL, _ mode: Int) {
+    try? FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
+}
+
+private func leftovers(_ dir: URL) -> [String] {
+    ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasPrefix(".rondo-move-") }
+}
+
+/// Cross-volume path (copy → verify → rename → remove), forced on one volume.
+@Suite struct FileMoverCopyPathTests {
+    @Test func copiesVerifiesRenamesThenRemovesOriginal() throws {
+        let src = try makeScratch(), dst = try makeScratch()
+        defer { [src, dst].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let folder = src.appendingPathComponent("Album", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        touch(folder.appendingPathComponent("a.jpg"), "aaaa")
+        touch(folder.appendingPathComponent("nested/b.txt"), "bb")
+        try FileManager.default.createSymbolicLink(atPath: folder.appendingPathComponent("link").path, withDestinationPath: "a.jpg")
+        let file = src.appendingPathComponent("photo.jpg")
+        touch(file, "new")
+        touch(dst.appendingPathComponent("photo.jpg"), "existing")
+        try FileManager.default.createDirectory(at: dst.appendingPathComponent("Album"), withIntermediateDirectories: true)
+
+        let out = FileMover.move([folder, file], to: dst, fileManager: .default, forceCopy: true)
+        #expect(out.map { $0.destination?.lastPathComponent } == ["Album 2", "photo 2.jpg"])
+        #expect(out.allSatisfy { if case .moved = $0.status { true } else { false } })
+        #expect(contents(dst.appendingPathComponent("Album 2/nested/b.txt")) == "bb")
+        #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: dst.appendingPathComponent("Album 2/link").path)) == "a.jpg")
+        #expect(contents(dst.appendingPathComponent("photo.jpg")) == "existing")
+        #expect(contents(dst.appendingPathComponent("photo 2.jpg")) == "new")
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(leftovers(dst).isEmpty)
+    }
+
+    @Test func failedCopyLeavesOriginalAndNoPartialCopy() throws {
+        let src = try makeScratch(), dst = try makeScratch()
+        let folder = src.appendingPathComponent("Docs", isDirectory: true)
+        let secret = folder.appendingPathComponent("secret.txt")
+        defer {
+            setPermissions(secret, 0o644)
+            [src, dst].forEach { try? FileManager.default.removeItem(at: $0) }
+        }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        touch(folder.appendingPathComponent("ok.txt"), "ok")
+        touch(secret, "s")
+        setPermissions(secret, 0o000)   // copy fails partway through
+
+        let out = FileMover.move([folder], to: dst, fileManager: .default, forceCopy: true)
+        if case .failed = out[0].status {} else { Issue.record("expected failure, got \(out[0].status)") }
+        #expect(FileManager.default.fileExists(atPath: secret.path))
+        #expect(contents(folder.appendingPathComponent("ok.txt")) == "ok")
+        #expect(leftovers(dst).isEmpty)
+        #expect(((try? FileManager.default.contentsOfDirectory(atPath: dst.path)) ?? []).isEmpty)
+    }
+
+    @Test func undeletableOriginalIsNotCopied() throws {
+        let src = try makeScratch(), dst = try makeScratch()
+        let locked = src.appendingPathComponent("Locked", isDirectory: true)
+        defer {
+            setPermissions(locked, 0o755)
+            [src, dst].forEach { try? FileManager.default.removeItem(at: $0) }
+        }
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        let file = locked.appendingPathComponent("keep.txt")
+        touch(file, "keep")
+        setPermissions(locked, 0o555)   // can't unlink inside
+
+        let out = FileMover.move([file], to: dst, fileManager: .default, forceCopy: true)
+        if case .failed = out[0].status {} else { Issue.record("expected failure, got \(out[0].status)") }
+        #expect(contents(file) == "keep")
+        #expect(((try? FileManager.default.contentsOfDirectory(atPath: dst.path)) ?? []).isEmpty)
+    }
+}
+
+@Suite struct FileMoverSymlinkTests {
+    @Test func symlinkToFolderCanMoveIntoItsTarget() throws {
+        let dir = try makeScratch()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let real = dir.appendingPathComponent("Real", isDirectory: true)
+        let sub = real.appendingPathComponent("Sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        let link = dir.appendingPathComponent("F")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let out = FileMover.move([link], to: sub)
+        #expect(out[0].destination?.lastPathComponent == "F")
+        let moved = sub.appendingPathComponent("F")
+        #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: moved.path)) == real.path)
+        #expect(FileManager.default.fileExists(atPath: sub.path))   // target untouched
+
+        // A real folder still can't go inside itself.
+        let intoSelf = FileMover.move([real], to: sub)
+        if case .failed = intoSelf[0].status {} else { Issue.record("folder into its own child must fail") }
+    }
+}
+
+@Suite @MainActor struct ActionMoveTests {
+    @Test func moveRunsOffMainAndReports() async throws {
+        let src = try makeScratch(), dst = try makeScratch()
+        defer { [src, dst].forEach { try? FileManager.default.removeItem(at: $0) } }
+        let a = src.appendingPathComponent("a.txt"), b = src.appendingPathComponent("b.txt")
+        touch(a, "A"); touch(b, "B")
+        touch(dst.appendingPathComponent("a.txt"), "old")
+
+        let performer = ActionPerformer(floatShelf: FloatShelf(defaults: UserDefaults(suiteName: "rondo.shell.tests.move")!))
+        var settings = RondoKit.Settings()
+        settings.revealInFinder = false
+        performer.settings = { settings }
+        var messages: [String] = []
+        performer.onMessage = { m, _ in messages.append(m) }
+
+        let out = try #require(await performer.move([a, b], to: dst))
+        #expect(out.map { $0.destination?.lastPathComponent } == ["a 2.txt", "b.txt"])
+        #expect(contents(dst.appendingPathComponent("a.txt")) == "old")
+        #expect(!performer.isMoving([a, b]))
+        #expect(messages.isEmpty)
     }
 }

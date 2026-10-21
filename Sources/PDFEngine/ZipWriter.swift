@@ -1,5 +1,6 @@
 import Foundation
 import Compression
+import RondoKit
 
 /// Minimal in-memory ZIP writer (store + raw DEFLATE via Compression's COMPRESSION_ZLIB).
 /// Entries are written in the order added — EPUB needs `mimetype` first and stored.
@@ -16,13 +17,23 @@ struct ZipWriter {
         dosDate = UInt16((max(0, (c.year ?? 1980) - 1980) << 9) | ((c.month ?? 1) << 5) | (c.day ?? 1))
     }
 
-    mutating func add(_ name: String, _ data: Data, compress: Bool = true) {
+    /// Classic (non-ZIP64) limits.
+    static let maxEntries = 65_535
+
+    mutating func add(_ name: String, _ data: Data, compress: Bool = true) throws {
+        guard count < Self.maxEntries else {
+            throw EngineError.failed("Archive would have more than \(Self.maxEntries) entries")
+        }
         let nameData = Data(name.utf8)
+        guard nameData.count <= Int(UInt16.max) else { throw EngineError.failed("Archive entry name too long") }
         let crc = CRC32.checksum(data)
         let deflated = compress ? Self.deflate(data) : nil
         let payload = deflated ?? data
         let method: UInt16 = deflated == nil ? 0 : 8
         let flags: UInt16 = nameData.count == name.count ? 0 : 0x0800   // UTF-8 names flag only when needed
+        guard data.count < Int(UInt32.max), body.count + payload.count + nameData.count + 30 < Int(UInt32.max) else {
+            throw EngineError.failed("Archive would exceed 4 GB")
+        }
         let offset = UInt32(body.count)
 
         var local = Data()

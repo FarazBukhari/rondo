@@ -27,6 +27,10 @@ enum PDFSupport {
         return d
     }
 
+    static func byteString(_ n: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file)
+    }
+
     static func fileSize(_ url: URL) -> Int {
         ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue ?? 0
     }
@@ -83,6 +87,31 @@ enum PDFSupport {
 extension JobSpec {
     /// 1-based page numbers from a `list` option, keeping only valid ones.
     func pageList(_ key: String, pageCount: Int) -> [Int] {
-        list(key).map { Int($0.rounded()) }.filter { (1...pageCount).contains($0) }
+        list(key).filter(\.isFinite).map { $0.rounded() }
+            .filter { $0 >= 1 && $0 <= Double(pageCount) }.map { Int($0) }
+    }
+
+    /// Clockwise quarter-turns as degrees (0/90/180/270) from a `list`; non-finite entries count as 0.
+    func quarterTurns(_ key: String) -> [Int] {
+        list(key).map { v in
+            guard v.isFinite else { return 0 }
+            let q = (v / 90).rounded().truncatingRemainder(dividingBy: 4)
+            return ((Int(q) % 4 + 4) % 4) * 90
+        }
+    }
+
+    /// Option as a finite Double, or nil when missing / NaN / ±inf.
+    func finite(_ key: String) -> Double? {
+        let v = double(key, default: .nan)
+        return v.isFinite ? v : nil
+    }
+
+    func clamped(_ key: String, default d: Double, _ range: ClosedRange<Double>) -> Double {
+        min(max(finite(key) ?? d, range.lowerBound), range.upperBound)
+    }
+
+    /// Integer option clamped in Double space before converting (never traps).
+    func clampedInt(_ key: String, default d: Int, _ range: ClosedRange<Int>) -> Int {
+        Int(clamped(key, default: Double(d), Double(range.lowerBound)...Double(range.upperBound)).rounded())
     }
 }

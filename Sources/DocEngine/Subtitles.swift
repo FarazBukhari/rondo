@@ -88,15 +88,20 @@ enum Subtitles {
         for (idx, p) in parts.enumerated() {
             let isLast = idx == parts.count - 1
             if isLast {
-                guard let v = Double(p), v >= 0 else { return nil }
+                // Plain decimal seconds only (Double() would also accept "inf", "nan", "1e308").
+                guard !p.isEmpty, p.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == ".") }), let v = Double(p), v >= 0 else { return nil }
                 seconds = seconds * 60 + v
             } else {
                 guard !p.isEmpty, p.allSatisfy(\.isNumber), let v = Int(p) else { return nil }
                 seconds = seconds * 60 + Double(v)
             }
         }
+        guard seconds.isFinite, seconds <= maxSeconds else { return nil }
         return seconds
     }
+
+    /// Timestamps beyond ~31 years are treated as garbage, not cues.
+    static let maxSeconds = 1e9
 
     // MARK: Write
 
@@ -135,7 +140,8 @@ enum Subtitles {
     }
 
     static func stamp(_ t: Double, sep: String) -> String {
-        let ms = Int((max(0, t) * 1000).rounded())
+        let clamped = t.isFinite ? min(max(t, 0), maxSeconds) : 0
+        let ms = Int((clamped * 1000).rounded())
         let h = ms / 3_600_000, m = (ms / 60_000) % 60, s = (ms / 1000) % 60, f = ms % 1000
         return String(format: "%02d:%02d:%02d%@%03d", h, m, s, sep, f)
     }

@@ -60,7 +60,9 @@ public final class MediaEditorModel: ObservableObject {
     static let waveformBuckets = 800
 
     private var tasks: [Task<Void, Never>] = []
-    private var stillTask: Task<Void, Never>?
+    /// Still-frame jobs by request number. Superseded ones are cancelled but stay here until they
+    /// finish, so `shutdown()` waits for their ffmpeg children too.
+    private var stillTasks: [Int: Task<Void, Never>] = [:]
     private var stillCounter = 0
     private var cleanupTask: Task<Void, Never>?
     private var timeObserver: Any?
@@ -150,11 +152,13 @@ public final class MediaEditorModel: ObservableObject {
         endObserver = nil
         isPlaying = false
         player = nil
-        let running = tasks + [stillTask].compactMap { $0 }
+        let running = tasks + Array(stillTasks.values)
         tasks.removeAll()
-        stillTask = nil
+        stillTasks.removeAll()
         running.forEach { $0.cancel() }
         let dir = workDir
+        // Remove the scratch dir only after every preview task has returned: ProcessRunner returns
+        // from a cancelled run only once its ffmpeg child has exited, so nothing can write into it later.
         cleanupTask = Task.detached {
             for t in running { await t.value }
             if let dir { TempDir.remove(dir) }
@@ -165,6 +169,11 @@ public final class MediaEditorModel: ObservableObject {
     /// Waits until cancelled preview processes have exited and the scratch dir is gone.
     public func waitForCleanup() async {
         await cleanupTask?.value
+    }
+
+    /// Last resort when cleanup didn't finish in time (app quitting): delete the scratch dir now.
+    func removeWorkDirNow() {
+        if let workDir { TempDir.remove(workDir) }
     }
 
     // MARK: Submit / cancel
@@ -374,21 +383,26 @@ public final class MediaEditorModel: ObservableObject {
     /// Debounced ffmpeg frame at the playhead, shown while there is no player.
     private func requestStillFrame() {
         guard isVideo, player == nil, !isShutDown, let work = workDir else { return }
-        stillTask?.cancel()
+        stillTasks.values.forEach { $0.cancel() }
         stillCounter += 1
         let n = stillCounter
-        let t = currentTime
+        let t = EditorDraft.clampSnapshot(currentTime, duration: duration)
         let height = Int(min(720, details?.displaySize?.height ?? 720))
         let gen = PreviewGenerator(source: url, workDir: work, tools: tools)
-        stillTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 120_000_000)
-            guard !Task.isCancelled else { return }
-            guard let file = try? await gen.frame(at: DraftTime.stillTime(t, duration: self?.duration ?? t), height: height, name: "still-\(n).png"),
-                  let data = try? Data(contentsOf: file), let image = NSImage(data: data) else { return }
-            try? FileManager.default.removeItem(at: file)
-            guard let self, !Task.isCancelled, !self.isShutDown, self.player == nil else { return }
-            self.stillFrame = image
+        stillTasks[n] = Task { [weak self] in
+            await self?.loadStill(gen, at: t, height: height, name: "still-\(n).png")
+            self?.stillTasks[n] = nil
         }
+    }
+
+    private func loadStill(_ gen: PreviewGenerator, at t: Double, height: Int, name: String) async {
+        try? await Task.sleep(nanoseconds: 120_000_000)   // debounce scrubbing
+        guard !Task.isCancelled, !isShutDown else { return }
+        guard let file = try? await gen.frame(at: t, height: height, name: name) else { return }
+        let image = (try? Data(contentsOf: file)).flatMap(NSImage.init(data:))
+        try? FileManager.default.removeItem(at: file)
+        guard let image, !Task.isCancelled, !isShutDown, player == nil else { return }
+        stillFrame = image
     }
 
     /// Filmstrip frame closest to the playhead (instant feedback before the still frame arrives).
@@ -617,13 +631,6 @@ public enum EditorKey: Equatable, Sendable {
             guard !shift, let c = characters?.lowercased(), c.count == 1, let ch = c.first, ch.isLetter else { return nil }
             return .character(ch)
         }
-    }
-}
-
-enum DraftTime {
-    /// Keeps still-frame seeks off the very last frame (which often fails to decode).
-    static func stillTime(_ t: Double, duration: Double) -> Double {
-        EditorDraft.clampSnapshot(t, duration: duration)
     }
 }
 

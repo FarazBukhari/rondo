@@ -12,6 +12,7 @@ public final class ActionPerformer: NSObject, NSSharingServiceDelegate {
     public var onMessage: ((String, String?) -> Void)?
 
     private var sharing: NSSharingService?
+    private var moving = Set<String>()
 
     public init(floatShelf: FloatShelf) {
         self.floatShelf = floatShelf
@@ -75,6 +76,10 @@ public final class ActionPerformer: NSObject, NSSharingServiceDelegate {
     // MARK: Move
 
     public func chooseFolderAndMove(_ urls: [URL]) {
+        guard !isMoving(urls) else {
+            report("Those items are already being moved.", nil)
+            return
+        }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -87,25 +92,45 @@ public final class ActionPerformer: NSObject, NSSharingServiceDelegate {
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
             guard response == .OK, let dir = panel.url else { return }
-            self?.move(urls, to: dir)
+            Task { @MainActor [weak self] in _ = await self?.move(urls, to: dir) }
         }
     }
 
-    /// Collision-safe move ("name 2.ext"), then reveal the moved files if enabled.
+    /// True while any of `urls` is part of a Move still running.
+    public func isMoving(_ urls: [URL]) -> Bool {
+        urls.contains { moving.contains($0.standardizedFileURL.path) }
+    }
+
+    /// Collision-safe move ("name 2.ext") on a background thread, then reveal the moved files if
+    /// enabled. Single-flight: items already being moved are refused (returns nil).
     @discardableResult
-    public func move(_ urls: [URL], to directory: URL) -> [MoveOutcome] {
-        let outcomes = FileMover.move(urls, to: directory)
-        let moved = outcomes.compactMap(\.destination)
-        let failures = outcomes.compactMap { o -> String? in
-            if case .failed(let why) = o.status { return "\(o.source.lastPathComponent): \(why)" }
+    public func move(_ urls: [URL], to directory: URL) async -> [MoveOutcome]? {
+        guard !isMoving(urls) else {
+            report("Those items are already being moved.", nil)
             return nil
         }
-        ShellLog.logger.notice("moved \(moved.count) item(s) to \(directory.path, privacy: .public); \(failures.count) failed")
-        if !moved.isEmpty, settings().revealInFinder {
-            NSWorkspace.shared.activateFileViewerSelecting(moved)
+        let paths = Set(urls.map { $0.standardizedFileURL.path })
+        moving.formUnion(paths)
+        defer { moving.subtract(paths) }
+
+        let outcomes = await Task.detached(priority: .userInitiated) {
+            FileMover.move(urls, to: directory)
+        }.value
+
+        let landed = outcomes.compactMap(\.destination)
+        let problems = outcomes.compactMap { o -> String? in
+            switch o.status {
+            case .failed(let why): "\(o.source.lastPathComponent): \(why)"
+            case .copiedOriginalKept(_, let why): "\(o.source.lastPathComponent): copied, but the original couldn't be removed (\(why))"
+            default: nil
+            }
         }
-        if !failures.isEmpty {
-            report("Some items couldn't be moved.", failures.prefix(8).joined(separator: "\n"))
+        ShellLog.logger.notice("moved \(landed.count) item(s) to \(directory.path, privacy: .public); \(problems.count) problem(s)")
+        if !landed.isEmpty, settings().revealInFinder {
+            NSWorkspace.shared.activateFileViewerSelecting(landed)
+        }
+        if !problems.isEmpty {
+            report("Some items couldn't be moved.", problems.prefix(8).joined(separator: "\n"))
         }
         return outcomes
     }

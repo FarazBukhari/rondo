@@ -9,12 +9,18 @@ import RondoKit
 /// (Automation permission, prompted by macOS on first use) and calls back with the files and cursor.
 @MainActor
 public final class GlobalHotkey {
-    /// Called when the hotkey fires but there is nothing to act on (empty selection, permission
-    /// denied, Finder error). Default: beep + log.
+    /// Notified when the hotkey fires but there is nothing to act on (empty selection, permission
+    /// denied, Finder error), after the default feedback.
     public var onError: ((FinderSelectionError) -> Void)?
+    /// Beep for empty selection / Finder not active / no response; an alert offering the Automation
+    /// privacy pane when Finder access is denied. Set false to handle everything in `onError`.
+    public var showsDefaultFeedback = true
     /// Only act when Finder is the active app, so a stale selection is never used by surprise.
     public var requireFinderFrontmost = true
+    /// Seconds to wait for Finder (`osascript`) before giving up.
+    public var finderTimeout: TimeInterval = 10
     public private(set) var hotkey: Hotkey?
+    private var fetching = false
 
     private var ref: EventHotKeyRef?
     private var slot: UInt32 = 0
@@ -53,22 +59,53 @@ public final class GlobalHotkey {
         return true
     }
 
-    /// Registers `hotkey` to fetch Finder's selection and call `onOpenWheel(urls, cursor)`.
-    /// The point is in AppKit screen coordinates (`NSEvent.mouseLocation`).
+    /// Registers `hotkey` to fetch Finder's selection (off the main thread, via `osascript`) and call
+    /// `onOpenWheel(urls, cursor)` on the main actor. The point is the cursor at key press, in AppKit
+    /// screen coordinates. Presses while a fetch is still running are ignored.
     @discardableResult
     public func registerFinderSelection(_ hotkey: Hotkey, onOpenWheel: @escaping ([URL], CGPoint) -> Void) -> Bool {
         register(hotkey) { [weak self] in
+            guard let self, !self.fetching else { return }
             let cursor = NSEvent.mouseLocation
             let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == FinderSelection.bundleID
-            let result: Result<[URL], FinderSelectionError> =
-                (self?.requireFinderFrontmost ?? true) && !frontmost ? .failure(.finderNotFrontmost) : FinderSelection.current()
-            switch result {
-            case .success(let urls):
-                onOpenWheel(urls, cursor)
-            case .failure(let error):
-                ShellLog.logger.notice("hotkey: \(error.localizedDescription, privacy: .public)")
-                if let onError = self?.onError { onError(error) } else { NSSound.beep() }
+            if self.requireFinderFrontmost, !frontmost {
+                self.failed(.finderNotFrontmost)
+                return
             }
+            self.fetching = true
+            let timeout = self.finderTimeout
+            Task { @MainActor [weak self] in
+                let result = await FinderSelection.current(timeout: timeout)
+                guard let self else { return }
+                self.fetching = false
+                switch result {
+                case .success(let urls): onOpenWheel(urls, cursor)
+                case .failure(let error): self.failed(error)
+                }
+            }
+        }
+    }
+
+    private func failed(_ error: FinderSelectionError) {
+        ShellLog.logger.notice("hotkey: \(error.localizedDescription, privacy: .public)")
+        if showsDefaultFeedback { Self.presentDefaultFeedback(for: error) }
+        onError?(error)
+    }
+
+    /// Beep, or for a denied Automation permission an alert that can open the privacy pane.
+    public static func presentDefaultFeedback(for error: FinderSelectionError) {
+        guard error == .notPermitted else {
+            NSSound.beep()
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Rondo can't read the Finder selection"
+        alert.informativeText = "Allow Rondo to control Finder in System Settings › Privacy & Security › Automation, then press the shortcut again."
+        alert.addButton(withTitle: "Open Automation Settings")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            Permissions.openAutomationSettings()
         }
     }
 
@@ -137,6 +174,7 @@ public enum FinderSelectionError: Error, LocalizedError, Equatable {
     case notPermitted
     case finderNotRunning
     case finderNotFrontmost
+    case timedOut
     case script(String)
 
     public var errorDescription: String? {
@@ -145,6 +183,7 @@ public enum FinderSelectionError: Error, LocalizedError, Equatable {
         case .notPermitted: "Rondo isn't allowed to control Finder. Allow it in System Settings › Privacy & Security › Automation."
         case .finderNotRunning: "Finder isn't running."
         case .finderNotFrontmost: "Finder isn't the active app."
+        case .timedOut: "Finder didn't respond in time. If macOS asked for permission, try again."
         case .script(let m): "Couldn't read the Finder selection: \(m)"
         }
     }
@@ -152,51 +191,78 @@ public enum FinderSelectionError: Error, LocalizedError, Equatable {
 
 public enum FinderSelection {
     public static let bundleID = "com.apple.finder"
-    static let source = "tell application \"Finder\" to get selection as alias list"
+    /// POSIX paths of the selection, one per line (folders end in "/").
+    static let script = [
+        "tell application \"Finder\" to set sel to selection as alias list",
+        "set out to \"\"",
+        "repeat with a in sel",
+        "set out to out & POSIX path of (contents of a) & linefeed",
+        "end repeat",
+        "return out",
+    ]
 
-    /// Current Finder selection as file URLs. Runs an Apple Event; call on the main thread.
+    /// Current Finder selection as file URLs. Runs `osascript` off the main thread with a timeout.
     /// The first call triggers macOS's Automation consent prompt (the user decides).
-    @MainActor
-    public static func current() -> Result<[URL], FinderSelectionError> {
-        switch AppleScriptRunner.run(source) {
+    public static func current(timeout: TimeInterval = 10) async -> Result<[URL], FinderSelectionError> {
+        switch await AppleScriptRunner.run(script, timeout: timeout) {
         case .failure(let e):
             return .failure(e)
-        case .success(let desc):
-            let urls = fileURLs(in: desc)
+        case .success(let out):
+            let urls = parse(out)
             return urls.isEmpty ? .failure(.empty) : .success(urls)
         }
     }
 
-    static func fileURLs(in desc: NSAppleEventDescriptor) -> [URL] {
-        if desc.descriptorType == typeAEList {
-            guard desc.numberOfItems > 0 else { return [] }
-            return (1...desc.numberOfItems).compactMap { desc.atIndex($0).flatMap(fileURL) }
-        }
-        return fileURL(desc).map { [$0] } ?? []
-    }
-
-    private static func fileURL(_ d: NSAppleEventDescriptor) -> URL? {
-        if let u = d.fileURLValue { return u }
-        return d.coerce(toDescriptorType: typeFileURL)?.fileURLValue
+    /// `osascript` stdout (one POSIX path per line) → file URLs.
+    static func parse(_ output: String) -> [URL] {
+        output.split(separator: "\n", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\r")) }
+            .filter { $0.hasPrefix("/") }
+            .map { URL(fileURLWithPath: $0) }
     }
 }
 
-/// Thin `NSAppleScript` wrapper mapping well-known Apple Event errors.
+/// Runs AppleScript through `/usr/bin/osascript` (RondoKit `ProcessRunner`) so a busy Finder or a
+/// pending consent prompt never blocks the main thread. Maps well-known Apple Event errors.
 enum AppleScriptRunner {
-    @MainActor
-    static func run(_ source: String) -> Result<NSAppleEventDescriptor, FinderSelectionError> {
-        guard let script = NSAppleScript(source: source) else { return .failure(.script("invalid script")) }
-        var info: NSDictionary?
-        let result = script.executeAndReturnError(&info)
-        if let info {
-            let code = (info[NSAppleScript.errorNumber] as? Int) ?? 0
-            let message = (info[NSAppleScript.errorMessage] as? String) ?? "error \(code)"
-            switch code {
-            case -1743: return .failure(.notPermitted)       // errAEEventNotPermitted
-            case -600: return .failure(.finderNotRunning)    // procNotFound
-            default: return .failure(.script(message))
+    static func run(_ lines: [String], timeout: TimeInterval) async -> Result<String, FinderSelectionError> {
+        guard let osascript = ToolLocator().url(for: "osascript") else { return .failure(.script("osascript not found")) }
+        let args = lines.flatMap { ["-e", $0] }
+        do {
+            let output: String? = try await withThrowingTaskGroup(of: String?.self) { group in
+                group.addTask { try await ProcessRunner.run(osascript, args).stdout }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(max(timeout, 0.1) * 1_000_000_000))
+                    return nil
+                }
+                let first = try await group.next() ?? nil
+                group.cancelAll()   // kills osascript on timeout
+                return first
             }
+            guard let output else { return .failure(.timedOut) }
+            return .success(output)
+        } catch let e as ProcessError {
+            return .failure(map(stderr: e.stderrTail))
+        } catch {
+            return .failure(.script(error.localizedDescription))
         }
-        return .success(result)
+    }
+
+    /// "…: execution error: Not authorized to send Apple events to Finder. (-1743)" → `.notPermitted`.
+    static func map(stderr: String) -> FinderSelectionError {
+        let line = stderr.split(separator: "\n").last.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
+        var code = 0
+        if line.hasSuffix(")"), let open = line.lastIndex(of: "(") {
+            code = Int(line[line.index(after: open)..<line.index(before: line.endIndex)]) ?? 0
+        }
+        switch code {
+        case -1743, -1744: return .notPermitted   // errAEEventNotPermitted / would require consent
+        case -600: return .finderNotRunning       // procNotFound
+        case -1712: return .timedOut              // errAETimeout
+        default:
+            var message = line
+            if let r = message.range(of: "execution error: ") { message = String(message[r.upperBound...]) }
+            return .script(message.isEmpty ? "osascript failed" : message)
+        }
     }
 }
