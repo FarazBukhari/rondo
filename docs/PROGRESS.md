@@ -9,7 +9,7 @@ Updated by `/orchestrate`. A box is checked only after the orchestrator ran the 
 - [x] **P2 Contracts** — RondoKit per ARCHITECTURE.md, unit tests
 - [x] **P3 Workstreams** — W1 Interaction · W2 Shell+Actions · W3 Image+PDF · W4 Media · W5 Docs
   - [x] W1  - [x] W2  - [x] W3  - [x] W4  - [x] W5
-- [ ] **P4 Integration** — registry wiring, app composition, rondo-cli, fixtures, smoke matrix
+- [x] **P4 Integration** — registry wiring, app composition, rondo-cli, fixtures, smoke matrix
 - [ ] **P5 Tool windows** — W6 Image editor · W7 Media editor · W8 PDF organizer
   - [ ] W6  - [ ] W7  - [ ] W8
 - [ ] **P6 Polish** — settings complete, original icon, release build, launch at login, permission onboarding
@@ -28,18 +28,30 @@ Updated by `/orchestrate`. A box is checked only after the orchestrator ran the 
 
 ## Smoke matrix (P4/P7 fill)
 
+Full run 2026-10-21 (P4 gate), `scripts/smoke.sh`, 4 engines, 403 conversions + 32 tools on this Mac:
+
 | Kind | Pass | Fail | Notes |
 |------|------|------|-------|
+| image | 222 | 0 | QR read only on `qr.png` fixture |
+| video | 146 | 0 | |
+| audio | 128 | 0 | |
+| pdf | 24 | 0 | 3 initial fails were correct "No text found" errors on image-only `images.pdf` (→ md/docx/epub); reclassified as expected, PDF slice re-run 24/24 |
+| document | 67 | 0 | |
+| spreadsheet | 12 | 0 | |
+| subtitle | 10 | 0 | |
+| archive | 4 | 0 | |
+| folder | 3 | 0 | |
+| **total** | **616** | **0** | + 5/5 expected errors correct. Slides untestable here (no Keynote/soffice → not advertised) |
 
 ## Manual QA (human only — never auto-checked)
 
-- [ ] Finder drag + Shift → Convert wheel at cursor; drop on slice converts
-- [ ] Finder drag + Option → Tools wheel; Control → Actions wheel
+- [x] Finder drag + Shift → Convert wheel at cursor; drop on slice converts — user-confirmed 2026-10-21
+- [x] Finder drag + Option → Tools wheel; Control → Actions wheel — user-confirmed 2026-10-21
 - [ ] Wheel stays open after key release; Esc / drop-outside cancels
 - [ ] Arrow keys + Enter during drag (Accessibility granted)
-- [ ] Batch drag (5 mixed images) → only shared formats shown; HUD shows 5 jobs; Finder reveals outputs
-- [ ] Status-item drop, hotkey on Finder selection, Float shelf drag-out
-- [ ] AirDrop / Copy / Move / Copy Path / Terminal actions
+- [x] Batch drag (5 mixed images) → only shared formats shown; HUD shows 5 jobs; Finder reveals outputs — user-confirmed 2026-10-21
+- [x] Status-item drop, hotkey on Finder selection, Float shelf drag-out — user-confirmed 2026-10-21
+- [ ] AirDrop / Copy / Move / Copy Path / Terminal actions (Copy Path / Float / Terminal user-confirmed; AirDrop / Copy / Move untested)
 - [ ] Editor windows: image crop/annotate/redact, video trim/split, PDF reorder
 - [ ] Settings: remap modifiers persists across relaunch; launch at login
 

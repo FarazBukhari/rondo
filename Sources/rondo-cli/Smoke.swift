@@ -36,7 +36,10 @@ enum Smoke {
     /// (fixture, operation label suffix) → substring of the clear error the engine must raise.
     /// Counted separately as "expected", not in the pass ratio.
     static let expectedErrors: [String: [String: String]] = [
-        "images.pdf": ["→ txt": "No text", "⚙ pdf.text.extract": "No text"],
+        "images.pdf": [
+            "→ txt": "No text", "→ md": "No text", "→ docx": "No text", "→ epub": "No text",
+            "⚙ pdf.text.extract": "No text",
+        ],
     ]
 
     /// Fixture pairs for combine tools, by kind.
