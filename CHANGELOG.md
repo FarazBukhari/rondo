@@ -2,7 +2,7 @@
 
 All notable changes to Rondo. Versions follow [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [0.1.2] - 2026-10-22
 
 - Settings → Tools no longer lists pandoc; no conversion uses it.
 - Install with Homebrew: `brew install --cask farazbukhari/tap/rondo`.
