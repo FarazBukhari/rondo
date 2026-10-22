@@ -93,7 +93,6 @@ final class SettingsModel: ObservableObject {
         ("ffmpeg", "Video and audio conversion"),
         ("ffprobe", "Media inspection"),
         ("magick", "Extra image formats (WebP, AVIF, SVG…)"),
-        ("pandoc", "Document conversion (optional)"),
         ("soffice", "Office documents via LibreOffice (optional)"),
     ]
 

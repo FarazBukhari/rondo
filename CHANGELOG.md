@@ -2,6 +2,11 @@
 
 All notable changes to Rondo. Versions follow [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+- Settings → Tools no longer lists pandoc; no conversion uses it.
+- Install with Homebrew: `brew install --cask farazbukhari/tap/rondo`.
+
 ## [0.1.1] - 2026-10-21
 
 - Fix: OCR (scanned PDFs → text), QR reading and background removal could hang the app on Macs with few CPU cores when several jobs ran at once. Apple's Vision framework is now always run off Swift's shared thread pool.
